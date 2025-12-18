@@ -1,0 +1,558 @@
+package sandbox
+
+import (
+	"crypto/rand"
+	"encoding/hex"
+	"fmt"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"regexp"
+	"strings"
+
+	"github.com/Use-Tusk/fence/internal/config"
+)
+
+// sessionSuffix is a unique identifier for this process session.
+var sessionSuffix = generateSessionSuffix()
+
+func generateSessionSuffix() string {
+	bytes := make([]byte, 8)
+	rand.Read(bytes)
+	return "_" + hex.EncodeToString(bytes)[:9] + "_SBX"
+}
+
+// MacOSSandboxParams contains parameters for macOS sandbox wrapping.
+type MacOSSandboxParams struct {
+	Command                 string
+	NeedsNetworkRestriction bool
+	HTTPProxyPort           int
+	SOCKSProxyPort          int
+	AllowUnixSockets        []string
+	AllowAllUnixSockets     bool
+	AllowLocalBinding       bool
+	ReadDenyPaths           []string
+	WriteAllowPaths         []string
+	WriteDenyPaths          []string
+	AllowPty                bool
+	AllowGitConfig          bool
+	Shell                   string
+}
+
+// GlobToRegex converts a glob pattern to a regex for macOS sandbox profiles.
+func GlobToRegex(glob string) string {
+	result := "^"
+
+	// Escape regex special characters (except glob chars)
+	escaped := regexp.QuoteMeta(glob)
+
+	// Restore glob patterns and convert them
+	// Order matters: ** before *
+	escaped = strings.ReplaceAll(escaped, `\*\*/`, "(.*/)?")
+	escaped = strings.ReplaceAll(escaped, `\*\*`, ".*")
+	escaped = strings.ReplaceAll(escaped, `\*`, "[^/]*")
+	escaped = strings.ReplaceAll(escaped, `\?`, "[^/]")
+
+	result += escaped + "$"
+	return result
+}
+
+// escapePath escapes a path for sandbox profile using JSON encoding.
+func escapePath(path string) string {
+	// Use Go's string quoting which handles escaping
+	return fmt.Sprintf("%q", path)
+}
+
+// getAncestorDirectories returns all ancestor directories of a path.
+func getAncestorDirectories(pathStr string) []string {
+	var ancestors []string
+	current := filepath.Dir(pathStr)
+
+	for current != "/" && current != "." {
+		ancestors = append(ancestors, current)
+		parent := filepath.Dir(current)
+		if parent == current {
+			break
+		}
+		current = parent
+	}
+
+	return ancestors
+}
+
+// getTmpdirParent gets the TMPDIR parent if it matches macOS pattern.
+func getTmpdirParent() []string {
+	tmpdir := os.Getenv("TMPDIR")
+	if tmpdir == "" {
+		return nil
+	}
+
+	// Match /var/folders/XX/YYY/T/
+	pattern := regexp.MustCompile(`^/(private/)?var/folders/[^/]{2}/[^/]+/T/?$`)
+	if !pattern.MatchString(tmpdir) {
+		return nil
+	}
+
+	parent := strings.TrimSuffix(tmpdir, "/")
+	parent = strings.TrimSuffix(parent, "/T")
+
+	// Return both /var/ and /private/var/ versions
+	if strings.HasPrefix(parent, "/private/var/") {
+		return []string{parent, strings.Replace(parent, "/private", "", 1)}
+	} else if strings.HasPrefix(parent, "/var/") {
+		return []string{parent, "/private" + parent}
+	}
+
+	return []string{parent}
+}
+
+// generateReadRules generates filesystem read rules for the sandbox profile.
+func generateReadRules(denyPaths []string, logTag string) []string {
+	var rules []string
+
+	// Allow all reads by default
+	rules = append(rules, "(allow file-read*)")
+
+	// Deny specific paths
+	for _, pathPattern := range denyPaths {
+		normalized := NormalizePath(pathPattern)
+
+		if ContainsGlobChars(normalized) {
+			regex := GlobToRegex(normalized)
+			rules = append(rules,
+				"(deny file-read*",
+				fmt.Sprintf("  (regex %s)", escapePath(regex)),
+				fmt.Sprintf("  (with message %q))", logTag),
+			)
+		} else {
+			rules = append(rules,
+				"(deny file-read*",
+				fmt.Sprintf("  (subpath %s)", escapePath(normalized)),
+				fmt.Sprintf("  (with message %q))", logTag),
+			)
+		}
+	}
+
+	// Block file movement to prevent bypass
+	rules = append(rules, generateMoveBlockingRules(denyPaths, logTag)...)
+
+	return rules
+}
+
+// generateWriteRules generates filesystem write rules for the sandbox profile.
+func generateWriteRules(allowPaths, denyPaths []string, allowGitConfig bool, logTag string) []string {
+	var rules []string
+
+	// Allow TMPDIR parent on macOS
+	for _, tmpdirParent := range getTmpdirParent() {
+		normalized := NormalizePath(tmpdirParent)
+		rules = append(rules,
+			"(allow file-write*",
+			fmt.Sprintf("  (subpath %s)", escapePath(normalized)),
+			fmt.Sprintf("  (with message %q))", logTag),
+		)
+	}
+
+	// Generate allow rules
+	for _, pathPattern := range allowPaths {
+		normalized := NormalizePath(pathPattern)
+
+		if ContainsGlobChars(normalized) {
+			regex := GlobToRegex(normalized)
+			rules = append(rules,
+				"(allow file-write*",
+				fmt.Sprintf("  (regex %s)", escapePath(regex)),
+				fmt.Sprintf("  (with message %q))", logTag),
+			)
+		} else {
+			rules = append(rules,
+				"(allow file-write*",
+				fmt.Sprintf("  (subpath %s)", escapePath(normalized)),
+				fmt.Sprintf("  (with message %q))", logTag),
+			)
+		}
+	}
+
+	// Combine user-specified and mandatory deny patterns
+	cwd, _ := os.Getwd()
+	allDenyPaths := append(denyPaths, GetMandatoryDenyPatterns(cwd, allowGitConfig)...)
+
+	for _, pathPattern := range allDenyPaths {
+		normalized := NormalizePath(pathPattern)
+
+		if ContainsGlobChars(normalized) {
+			regex := GlobToRegex(normalized)
+			rules = append(rules,
+				"(deny file-write*",
+				fmt.Sprintf("  (regex %s)", escapePath(regex)),
+				fmt.Sprintf("  (with message %q))", logTag),
+			)
+		} else {
+			rules = append(rules,
+				"(deny file-write*",
+				fmt.Sprintf("  (subpath %s)", escapePath(normalized)),
+				fmt.Sprintf("  (with message %q))", logTag),
+			)
+		}
+	}
+
+	// Block file movement
+	rules = append(rules, generateMoveBlockingRules(allDenyPaths, logTag)...)
+
+	return rules
+}
+
+// generateMoveBlockingRules generates rules to prevent file movement bypasses.
+func generateMoveBlockingRules(pathPatterns []string, logTag string) []string {
+	var rules []string
+
+	for _, pathPattern := range pathPatterns {
+		normalized := NormalizePath(pathPattern)
+
+		if ContainsGlobChars(normalized) {
+			regex := GlobToRegex(normalized)
+			rules = append(rules,
+				"(deny file-write-unlink",
+				fmt.Sprintf("  (regex %s)", escapePath(regex)),
+				fmt.Sprintf("  (with message %q))", logTag),
+			)
+
+			// For globs, extract static prefix and block ancestor moves
+			staticPrefix := strings.Split(normalized, "*")[0]
+			if staticPrefix != "" && staticPrefix != "/" {
+				baseDir := staticPrefix
+				if strings.HasSuffix(baseDir, "/") {
+					baseDir = baseDir[:len(baseDir)-1]
+				} else {
+					baseDir = filepath.Dir(staticPrefix)
+				}
+
+				rules = append(rules,
+					"(deny file-write-unlink",
+					fmt.Sprintf("  (literal %s)", escapePath(baseDir)),
+					fmt.Sprintf("  (with message %q))", logTag),
+				)
+
+				for _, ancestor := range getAncestorDirectories(baseDir) {
+					rules = append(rules,
+						"(deny file-write-unlink",
+						fmt.Sprintf("  (literal %s)", escapePath(ancestor)),
+						fmt.Sprintf("  (with message %q))", logTag),
+					)
+				}
+			}
+		} else {
+			rules = append(rules,
+				"(deny file-write-unlink",
+				fmt.Sprintf("  (subpath %s)", escapePath(normalized)),
+				fmt.Sprintf("  (with message %q))", logTag),
+			)
+
+			for _, ancestor := range getAncestorDirectories(normalized) {
+				rules = append(rules,
+					"(deny file-write-unlink",
+					fmt.Sprintf("  (literal %s)", escapePath(ancestor)),
+					fmt.Sprintf("  (with message %q))", logTag),
+				)
+			}
+		}
+	}
+
+	return rules
+}
+
+// GenerateSandboxProfile generates a complete macOS sandbox profile.
+func GenerateSandboxProfile(params MacOSSandboxParams) string {
+	logTag := "CMD64_" + EncodeSandboxedCommand(params.Command) + "_END" + sessionSuffix
+
+	var profile strings.Builder
+
+	// Header
+	profile.WriteString("(version 1)\n")
+	profile.WriteString(fmt.Sprintf("(deny default (with message %q))\n\n", logTag))
+	profile.WriteString(fmt.Sprintf("; LogTag: %s\n\n", logTag))
+
+	// Essential permissions - based on Chrome sandbox policy
+	profile.WriteString(`; Essential permissions - based on Chrome sandbox policy
+; Process permissions
+(allow process-exec)
+(allow process-fork)
+(allow process-info* (target same-sandbox))
+(allow signal (target same-sandbox))
+(allow mach-priv-task-port (target same-sandbox))
+
+; User preferences
+(allow user-preference-read)
+
+; Mach IPC - specific services only
+(allow mach-lookup
+  (global-name "com.apple.audio.systemsoundserver")
+  (global-name "com.apple.distributed_notifications@Uv3")
+  (global-name "com.apple.FontObjectsServer")
+  (global-name "com.apple.fonts")
+  (global-name "com.apple.logd")
+  (global-name "com.apple.lsd.mapdb")
+  (global-name "com.apple.PowerManagement.control")
+  (global-name "com.apple.system.logger")
+  (global-name "com.apple.system.notification_center")
+  (global-name "com.apple.trustd.agent")
+  (global-name "com.apple.system.opendirectoryd.libinfo")
+  (global-name "com.apple.system.opendirectoryd.membership")
+  (global-name "com.apple.bsd.dirhelper")
+  (global-name "com.apple.securityd.xpc")
+  (global-name "com.apple.coreservices.launchservicesd")
+)
+
+; POSIX IPC
+(allow ipc-posix-shm)
+(allow ipc-posix-sem)
+
+; IOKit
+(allow iokit-open
+  (iokit-registry-entry-class "IOSurfaceRootUserClient")
+  (iokit-registry-entry-class "RootDomainUserClient")
+  (iokit-user-client-class "IOSurfaceSendRight")
+)
+(allow iokit-get-properties)
+
+; System socket for network info
+(allow system-socket (require-all (socket-domain AF_SYSTEM) (socket-protocol 2)))
+
+; sysctl reads
+(allow sysctl-read
+  (sysctl-name "hw.activecpu")
+  (sysctl-name "hw.busfrequency_compat")
+  (sysctl-name "hw.byteorder")
+  (sysctl-name "hw.cacheconfig")
+  (sysctl-name "hw.cachelinesize_compat")
+  (sysctl-name "hw.cpufamily")
+  (sysctl-name "hw.cpufrequency")
+  (sysctl-name "hw.cpufrequency_compat")
+  (sysctl-name "hw.cputype")
+  (sysctl-name "hw.l1dcachesize_compat")
+  (sysctl-name "hw.l1icachesize_compat")
+  (sysctl-name "hw.l2cachesize_compat")
+  (sysctl-name "hw.l3cachesize_compat")
+  (sysctl-name "hw.logicalcpu")
+  (sysctl-name "hw.logicalcpu_max")
+  (sysctl-name "hw.machine")
+  (sysctl-name "hw.memsize")
+  (sysctl-name "hw.ncpu")
+  (sysctl-name "hw.nperflevels")
+  (sysctl-name "hw.packages")
+  (sysctl-name "hw.pagesize_compat")
+  (sysctl-name "hw.pagesize")
+  (sysctl-name "hw.physicalcpu")
+  (sysctl-name "hw.physicalcpu_max")
+  (sysctl-name "hw.tbfrequency_compat")
+  (sysctl-name "hw.vectorunit")
+  (sysctl-name "kern.argmax")
+  (sysctl-name "kern.bootargs")
+  (sysctl-name "kern.hostname")
+  (sysctl-name "kern.maxfiles")
+  (sysctl-name "kern.maxfilesperproc")
+  (sysctl-name "kern.maxproc")
+  (sysctl-name "kern.ngroups")
+  (sysctl-name "kern.osproductversion")
+  (sysctl-name "kern.osrelease")
+  (sysctl-name "kern.ostype")
+  (sysctl-name "kern.osvariant_status")
+  (sysctl-name "kern.osversion")
+  (sysctl-name "kern.secure_kernel")
+  (sysctl-name "kern.tcsm_available")
+  (sysctl-name "kern.tcsm_enable")
+  (sysctl-name "kern.usrstack64")
+  (sysctl-name "kern.version")
+  (sysctl-name "kern.willshutdown")
+  (sysctl-name "machdep.cpu.brand_string")
+  (sysctl-name "machdep.ptrauth_enabled")
+  (sysctl-name "security.mac.lockdown_mode_state")
+  (sysctl-name "sysctl.proc_cputype")
+  (sysctl-name "vm.loadavg")
+  (sysctl-name-prefix "hw.optional.arm")
+  (sysctl-name-prefix "hw.optional.arm.")
+  (sysctl-name-prefix "hw.optional.armv8_")
+  (sysctl-name-prefix "hw.perflevel")
+  (sysctl-name-prefix "kern.proc.all")
+  (sysctl-name-prefix "kern.proc.pgrp.")
+  (sysctl-name-prefix "kern.proc.pid.")
+  (sysctl-name-prefix "machdep.cpu.")
+  (sysctl-name-prefix "net.routetable.")
+)
+
+; V8 thread calculations
+(allow sysctl-write
+  (sysctl-name "kern.tcsm_enable")
+)
+
+; Distributed notifications
+(allow distributed-notification-post)
+
+; Security server
+(allow mach-lookup (global-name "com.apple.SecurityServer"))
+
+; Device I/O
+(allow file-ioctl (literal "/dev/null"))
+(allow file-ioctl (literal "/dev/zero"))
+(allow file-ioctl (literal "/dev/random"))
+(allow file-ioctl (literal "/dev/urandom"))
+(allow file-ioctl (literal "/dev/dtracehelper"))
+(allow file-ioctl (literal "/dev/tty"))
+
+(allow file-ioctl file-read-data file-write-data
+  (require-all
+    (literal "/dev/null")
+    (vnode-type CHARACTER-DEVICE)
+  )
+)
+
+`)
+
+	// Network rules
+	profile.WriteString("; Network\n")
+	if !params.NeedsNetworkRestriction {
+		profile.WriteString("(allow network*)\n")
+	} else {
+		if params.AllowLocalBinding {
+			profile.WriteString(`(allow network-bind (local ip "localhost:*"))
+(allow network-inbound (local ip "localhost:*"))
+(allow network-outbound (local ip "localhost:*"))
+`)
+		}
+
+		if params.AllowAllUnixSockets {
+			profile.WriteString("(allow network* (subpath \"/\"))\n")
+		} else if len(params.AllowUnixSockets) > 0 {
+			for _, socketPath := range params.AllowUnixSockets {
+				normalized := NormalizePath(socketPath)
+				profile.WriteString(fmt.Sprintf("(allow network* (subpath %s))\n", escapePath(normalized)))
+			}
+		}
+
+		if params.HTTPProxyPort > 0 {
+			profile.WriteString(fmt.Sprintf(`(allow network-bind (local ip "localhost:%d"))
+(allow network-inbound (local ip "localhost:%d"))
+(allow network-outbound (remote ip "localhost:%d"))
+`, params.HTTPProxyPort, params.HTTPProxyPort, params.HTTPProxyPort))
+		}
+
+		if params.SOCKSProxyPort > 0 {
+			profile.WriteString(fmt.Sprintf(`(allow network-bind (local ip "localhost:%d"))
+(allow network-inbound (local ip "localhost:%d"))
+(allow network-outbound (remote ip "localhost:%d"))
+`, params.SOCKSProxyPort, params.SOCKSProxyPort, params.SOCKSProxyPort))
+		}
+	}
+	profile.WriteString("\n")
+
+	// Read rules
+	profile.WriteString("; File read\n")
+	for _, rule := range generateReadRules(params.ReadDenyPaths, logTag) {
+		profile.WriteString(rule + "\n")
+	}
+	profile.WriteString("\n")
+
+	// Write rules
+	profile.WriteString("; File write\n")
+	for _, rule := range generateWriteRules(params.WriteAllowPaths, params.WriteDenyPaths, params.AllowGitConfig, logTag) {
+		profile.WriteString(rule + "\n")
+	}
+
+	// PTY support
+	if params.AllowPty {
+		profile.WriteString(`
+; Pseudo-terminal (pty) support
+(allow pseudo-tty)
+(allow file-ioctl
+  (literal "/dev/ptmx")
+  (regex #"^/dev/ttys")
+)
+(allow file-read* file-write*
+  (literal "/dev/ptmx")
+  (regex #"^/dev/ttys")
+)
+`)
+	}
+
+	return profile.String()
+}
+
+// WrapCommandMacOS wraps a command with macOS sandbox restrictions.
+func WrapCommandMacOS(cfg *config.Config, command string, httpPort, socksPort int, exposedPorts []int, debug bool) (string, error) {
+	needsNetwork := len(cfg.Network.AllowedDomains) > 0 || len(cfg.Network.DeniedDomains) > 0
+
+	// Build allow paths: default + configured
+	allowPaths := append(GetDefaultWritePaths(), cfg.Filesystem.AllowWrite...)
+
+	// Enable local binding if ports are exposed or if explicitly configured
+	allowLocalBinding := cfg.Network.AllowLocalBinding || len(exposedPorts) > 0
+
+	params := MacOSSandboxParams{
+		Command:                 command,
+		NeedsNetworkRestriction: needsNetwork || len(cfg.Network.AllowedDomains) == 0, // Block if no domains allowed
+		HTTPProxyPort:           httpPort,
+		SOCKSProxyPort:          socksPort,
+		AllowUnixSockets:        cfg.Network.AllowUnixSockets,
+		AllowAllUnixSockets:     cfg.Network.AllowAllUnixSockets,
+		AllowLocalBinding:       allowLocalBinding,
+		ReadDenyPaths:           cfg.Filesystem.DenyRead,
+		WriteAllowPaths:         allowPaths,
+		WriteDenyPaths:          cfg.Filesystem.DenyWrite,
+		AllowPty:                cfg.AllowPty,
+		AllowGitConfig:          cfg.Filesystem.AllowGitConfig,
+	}
+
+	if debug && len(exposedPorts) > 0 {
+		fmt.Fprintf(os.Stderr, "[fence:macos] Enabling local binding for exposed ports: %v\n", exposedPorts)
+	}
+
+	profile := GenerateSandboxProfile(params)
+
+	// Find shell
+	shell := params.Shell
+	if shell == "" {
+		shell = "bash"
+	}
+	shellPath, err := exec.LookPath(shell)
+	if err != nil {
+		return "", fmt.Errorf("shell %q not found: %w", shell, err)
+	}
+
+	// Generate proxy environment variables
+	proxyEnvs := GenerateProxyEnvVars(httpPort, socksPort)
+
+	// Build the command
+	// env VAR1=val1 VAR2=val2 sandbox-exec -p 'profile' shell -c 'command'
+	var parts []string
+	parts = append(parts, "env")
+	parts = append(parts, proxyEnvs...)
+	parts = append(parts, "sandbox-exec", "-p", profile, shellPath, "-c", command)
+
+	return ShellQuote(parts), nil
+}
+
+// ShellQuote quotes a slice of strings for shell execution.
+func ShellQuote(args []string) string {
+	var quoted []string
+	for _, arg := range args {
+		if needsQuoting(arg) {
+			quoted = append(quoted, fmt.Sprintf("'%s'", strings.ReplaceAll(arg, "'", "'\\''")))
+		} else {
+			quoted = append(quoted, arg)
+		}
+	}
+	return strings.Join(quoted, " ")
+}
+
+func needsQuoting(s string) bool {
+	for _, c := range s {
+		if c == ' ' || c == '\t' || c == '\n' || c == '"' || c == '\'' ||
+			c == '\\' || c == '$' || c == '`' || c == '!' || c == '*' ||
+			c == '?' || c == '[' || c == ']' || c == '(' || c == ')' ||
+			c == '{' || c == '}' || c == '<' || c == '>' || c == '|' ||
+			c == '&' || c == ';' || c == '#' {
+			return true
+		}
+	}
+	return len(s) == 0
+}
