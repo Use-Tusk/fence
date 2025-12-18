@@ -199,6 +199,6 @@ Install on Ubuntu/Debian:
 apt install bubblewrap socat
 ```
 
-## License
+## Attribution
 
-Apache-2.0
+Portions of this project are derived from Anthropic's [sandbox-runtime](https://github.com/anthropic-experimental/sandbox-runtime) (Apache-2.0). This repository contains modifications and additional original work.
