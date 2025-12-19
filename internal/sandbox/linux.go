@@ -80,8 +80,8 @@ func NewLinuxBridge(httpProxyPort, socksProxyPort int, debug bool) (*LinuxBridge
 		return nil, fmt.Errorf("failed to start SOCKS bridge: %w", err)
 	}
 
-	// Wait for sockets to be created
-	for i := 0; i < 50; i++ { // 5 seconds max
+	// Wait for sockets to be created, up to 5 seconds
+	for range 50 {
 		httpExists := fileExists(httpSocketPath)
 		socksExists := fileExists(socksSocketPath)
 		if httpExists && socksExists {

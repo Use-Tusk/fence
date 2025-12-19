@@ -107,17 +107,14 @@ var violationPattern = regexp.MustCompile(`Sandbox: (\w+)\((\d+)\) deny\(\d+\) (
 // parseViolation extracts and formats a sandbox violation from a log line.
 // Returns empty string if the line should be filtered out.
 func parseViolation(line string) string {
-	// Skip header lines
 	if strings.HasPrefix(line, "Filtering") || strings.HasPrefix(line, "Timestamp") {
 		return ""
 	}
 
-	// Skip duplicate report summaries
 	if strings.Contains(line, "duplicate report") {
 		return ""
 	}
 
-	// Skip CMD64 marker lines (they follow the actual violation)
 	if strings.HasPrefix(line, "CMD64_") {
 		return ""
 	}
@@ -133,17 +130,14 @@ func parseViolation(line string) string {
 	operation := matches[3]
 	details := strings.TrimSpace(matches[4])
 
-	// Filter: only show network and file operations
 	if !shouldShowViolation(operation) {
 		return ""
 	}
 
-	// Filter out noisy violations
 	if isNoisyViolation(details) {
 		return ""
 	}
 
-	// Format the output
 	timestamp := time.Now().Format("15:04:05")
 
 	if details != "" {
@@ -154,12 +148,10 @@ func parseViolation(line string) string {
 
 // shouldShowViolation returns true if this violation type should be displayed.
 func shouldShowViolation(operation string) bool {
-	// Show network violations
 	if strings.HasPrefix(operation, "network-") {
 		return true
 	}
 
-	// Show file read/write violations
 	if strings.HasPrefix(operation, "file-read") ||
 		strings.HasPrefix(operation, "file-write") {
 		return true
@@ -193,5 +185,5 @@ func isNoisyViolation(details string) bool {
 // GetSessionSuffix returns the session suffix used for filtering.
 // This is the same suffix used in macOS sandbox-exec profiles.
 func GetSessionSuffix() string {
-	return sessionSuffix // defined in macos.go
+	return sessionSuffix
 }

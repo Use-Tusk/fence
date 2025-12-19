@@ -101,7 +101,7 @@ Flags:
 ```bash
 # Block all network (default behavior)
 fence curl https://example.com
-# Output: curl: (7) Couldn't connect to server
+# Output: curl: (56) CONNECT tunnel failed, response 403
 
 # Use a custom config
 fence --settings ./my-config.json npm install
