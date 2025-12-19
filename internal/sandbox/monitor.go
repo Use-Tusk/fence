@@ -139,7 +139,7 @@ func parseViolation(line string) string {
 	}
 
 	// Filter out noisy violations
-	if isNoisyViolation(operation, details) {
+	if isNoisyViolation(details) {
 		return ""
 	}
 
@@ -170,7 +170,7 @@ func shouldShowViolation(operation string) bool {
 }
 
 // isNoisyViolation returns true if this violation is system noise that should be filtered.
-func isNoisyViolation(operation, details string) bool {
+func isNoisyViolation(details string) bool {
 	// Filter out TTY/terminal writes (very noisy from any process that prints output)
 	if strings.HasPrefix(details, "/dev/tty") ||
 		strings.HasPrefix(details, "/dev/pts") {
@@ -195,4 +195,3 @@ func isNoisyViolation(operation, details string) bool {
 func GetSessionSuffix() string {
 	return sessionSuffix // defined in macos.go
 }
-

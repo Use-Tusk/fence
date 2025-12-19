@@ -1,5 +1,7 @@
 # Binary (only at root, not cmd/fence or pkg/fence)
 /fence
+/fence_unix
+/fence_darwin
 
 # OS files
 .DS_Store
@@ -14,4 +16,7 @@ Thumbs.db
 # Test artifacts
 *.test
 coverage.out
+
+# GoReleaser
+/dist/
 
