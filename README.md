@@ -1,5 +1,7 @@
 # fence
 
+![GitHub Release](https://img.shields.io/github/v/release/Use-Tusk/fence)
+
 A Go implementation of process sandboxing with network and filesystem restrictions.
 
 `fence` wraps commands in a sandbox that blocks network access by default and restricts filesystem operations based on configurable rules. Useful for AI coding agents, untrusted code execution, or running processes with controlled side effects.
