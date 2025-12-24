@@ -17,19 +17,36 @@ Fence wraps commands in a sandbox that blocks network access by default and rest
 
 You can use Fence as a Go package or CLI tool.
 
+## Documentation
+
+- [Documentation index](docs/)
+- [Security model](docs/security-model.md)
+- [Architecture](ARCHITECTURE.md)
+- [Examples](examples/)
+
 ## Installation
+
+At the moment, we only support MacOS and Linux. For Windows users, we recommend using WSL.
 
 ```bash
 go install github.com/Use-Tusk/fence/cmd/fence@latest
 ```
 
-Or build from source:
+<details>
+<summary>Build from source</summary>
 
 ```bash
 git clone https://github.com/Use-Tusk/fence
 cd fence
 go build -o fence ./cmd/fence
 ```
+
+</details>
+
+**Additional requirements for Linux:**
+
+- `bubblewrap` (for sandboxing)
+- `socat` (for network bridging)
 
 ## Quick Start
 
@@ -129,27 +146,6 @@ func main() {
     fmt.Println("Sandboxed command:", wrapped)
 }
 ```
-
-## Documentation
-
-- [Documentation index](docs/)
-- [Security model](docs/security-model.md)
-- [Architecture](ARCHITECTURE.md)
-- [Examples](examples/)
-
-For detailed security model, limitations, and architecture, see [ARCHITECTURE.md](ARCHITECTURE.md).
-
-## Requirements
-
-### macOS
-
-- macOS 10.12+ (uses `sandbox-exec`)
-- No additional dependencies
-
-### Linux
-
-- `bubblewrap` (for sandboxing)
-- `socat` (for network bridging)
 
 ## Attribution
 
