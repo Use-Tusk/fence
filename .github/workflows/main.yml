@@ -51,12 +51,9 @@ jobs:
           install-mode: goinstall
           version: v1.64.8
 
-  test:
-    name: Test
-    strategy:
-      matrix:
-        os: [ubuntu-latest, macos-latest]
-    runs-on: ${{ matrix.os }}
+  test-linux:
+    name: Test (Linux)
+    runs-on: ubuntu-latest
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -67,14 +64,87 @@ jobs:
           go-version-file: go.mod
           cache: true
 
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
       - name: Download dependencies
         run: go mod download
 
-      - name: Install Linux dependencies
-        if: runner.os == 'Linux'
+      - name: Install Linux sandbox dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y bubblewrap socat
+          sudo apt-get install -y \
+            bubblewrap \
+            socat \
+            curl \
+            netcat-openbsd \
+            ripgrep
 
-      - name: Test
+      - name: Verify sandbox dependencies
+        run: |
+          echo "=== Checking sandbox dependencies ==="
+          bwrap --version
+          socat -V | head -1
+          echo "User namespaces enabled: $(cat /proc/sys/kernel/unprivileged_userns_clone 2>/dev/null || echo 'check not available')"
+          echo "Kernel version: $(uname -r)"
+
+      - name: Run unit and integration tests
         run: make test-ci
+
+      - name: Build binary for smoke tests
+        run: make build-ci
+
+      - name: Run smoke tests
+        run: FENCE_TEST_NETWORK=1 ./scripts/smoke_test.sh ./fence
+
+  test-macos:
+    name: Test (macOS)
+    runs-on: macos-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Download dependencies
+        run: go mod download
+
+      - name: Install macOS dependencies
+        run: |
+          brew install ripgrep coreutils
+
+      - name: Verify sandbox dependencies
+        run: |
+          echo "=== Checking sandbox dependencies ==="
+          echo "macOS version: $(sw_vers -productVersion)"
+          sandbox-exec -p '(version 1)(allow default)' /bin/echo "sandbox-exec works"
+
+      - name: Run unit and integration tests
+        run: make test-ci
+
+      - name: Build binary for smoke tests
+        run: make build-ci
+
+      - name: Run smoke tests
+        run: FENCE_TEST_NETWORK=1 ./scripts/smoke_test.sh ./fence
