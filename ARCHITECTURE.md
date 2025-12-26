@@ -27,7 +27,7 @@ flowchart TB
 ```text
 fence/
 ├── cmd/fence/           # CLI entry point
-│   └── main.go
+│   └── main.go          # Includes --landlock-apply wrapper mode
 ├── internal/            # Private implementation
 │   ├── config/          # Configuration loading/validation
 │   ├── platform/        # OS detection
@@ -36,9 +36,15 @@ fence/
 │       ├── manager.go   # Orchestrates sandbox lifecycle
 │       ├── macos.go     # macOS sandbox-exec profiles
 │       ├── linux.go     # Linux bubblewrap + socat bridges
+│       ├── linux_seccomp.go    # Seccomp BPF syscall filtering
+│       ├── linux_landlock.go   # Landlock filesystem control
+│       ├── linux_ebpf.go       # eBPF violation monitoring
+│       ├── linux_features.go   # Kernel feature detection
+│       ├── linux_*_stub.go     # Non-Linux build stubs
 │       ├── monitor.go   # macOS log stream violation monitoring
 │       ├── dangerous.go # Protected file/directory lists
-│       └── utils.go     # Path normalization, shell quoting
+│       ├── shell.go     # Shell quoting utilities
+│       └── utils.go     # Path normalization
 └── pkg/fence/           # Public Go API
     └── fence.go
 ```
@@ -238,13 +244,28 @@ flowchart TD
 
 | Feature | macOS | Linux |
 |---------|-------|-------|
-| Sandbox mechanism | sandbox-exec (Seatbelt) | bubblewrap (namespaces) |
+| Sandbox mechanism | sandbox-exec (Seatbelt) | bubblewrap + Landlock + seccomp |
 | Network isolation | Syscall filtering | Network namespace |
 | Proxy routing | Environment variables | socat bridges + env vars |
-| Filesystem control | Profile rules | Bind mounts |
+| Filesystem control | Profile rules | Bind mounts + Landlock (5.13+) |
+| Syscall filtering | Implicit (Seatbelt) | seccomp BPF |
 | Inbound connections | Profile rules (`network-bind`) | Reverse socat bridges |
-| Violation monitoring | log stream + proxy | proxy only |
+| Violation monitoring | log stream + proxy | eBPF + proxy |
 | Requirements | Built-in | bwrap, socat |
+
+### Linux Security Layers
+
+On Linux, fence uses multiple security layers with graceful fallback:
+
+1. bubblewrap (core isolation via Linux namespaces)
+2. seccomp (syscall filtering)
+3. Landlock (filesystem access control)
+4. eBPF monitoring (violation visibility)
+
+> [!NOTE]
+> Seccomp blocks syscalls silently (no logging). With `-m` and root/CAP_BPF, the eBPF monitor catches these failures by tracing syscall exits that return EPERM/EACCES.
+
+See [Linux Security Features](./docs/linux-security-features.md) for details.
 
 ## Violation Monitoring
 
@@ -257,6 +278,7 @@ The `-m` (monitor) flag enables real-time visibility into blocked operations.
 | `[fence:http]` | Both | HTTP/HTTPS proxy (blocked requests only in monitor mode) |
 | `[fence:socks]` | Both | SOCKS5 proxy (blocked requests only in monitor mode) |
 | `[fence:logstream]` | macOS only | Kernel-level sandbox violations from `log stream` |
+| `[fence:ebpf]` | Linux only | Filesystem/syscall failures (requires CAP_BPF or root) |
 | `[fence:filter]` | Both | Domain filter rule matches (debug mode only) |
 
 ### macOS Log Stream
@@ -280,17 +302,6 @@ Filtered out (too noisy):
 - `/dev/tty*` writes - terminal output
 - `mDNSResponder` - system DNS resolution
 - `/private/var/run/syslog` - system logging
-
-### Linux Limitations
-
-Linux uses network namespace isolation (`--unshare-net`), which prevents connections at the namespace level rather than logging them. There's no kernel-level violation stream equivalent to macOS.
-
-With `-m` on Linux, you only see proxy-level denials:
-
-```text
-[fence:http] 14:30:01 ✗ CONNECT 403 evil.com https://evil.com:443 (0s)
-[fence:socks] 14:30:02 ✗ CONNECT evil.com:22 BLOCKED
-```
 
 ### Debug vs Monitor Mode
 

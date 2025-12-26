@@ -1,7 +1,10 @@
 # Binary (only at root, not cmd/fence or pkg/fence)
 /fence
-/fence_unix
-/fence_darwin
+/fence_*
+/fence-*
+
+# Tar archives
+*.tar.gz
 
 # OS files
 .DS_Store

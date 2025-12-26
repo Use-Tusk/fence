@@ -1,8 +1,11 @@
+//go:build linux
+
 package sandbox
 
 import (
 	"crypto/rand"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
@@ -28,6 +31,20 @@ type ReverseBridge struct {
 	SocketPaths []string // Unix socket paths for each port
 	processes   []*exec.Cmd
 	debug       bool
+}
+
+// LinuxSandboxOptions contains options for the Linux sandbox.
+type LinuxSandboxOptions struct {
+	// Enable Landlock filesystem restrictions (requires kernel 5.13+)
+	UseLandlock bool
+	// Enable seccomp syscall filtering
+	UseSeccomp bool
+	// Enable eBPF monitoring (requires CAP_BPF or root)
+	UseEBPF bool
+	// Enable violation monitoring
+	Monitor bool
+	// Debug mode
+	Debug bool
 }
 
 // NewLinuxBridge creates Unix socket bridges to the proxy servers.
@@ -229,7 +246,18 @@ func getMandatoryDenyPaths(cwd string) []string {
 }
 
 // WrapCommandLinux wraps a command with Linux bubblewrap sandbox.
+// It uses available security features (Landlock, seccomp) with graceful fallback.
 func WrapCommandLinux(cfg *config.Config, command string, bridge *LinuxBridge, reverseBridge *ReverseBridge, debug bool) (string, error) {
+	return WrapCommandLinuxWithOptions(cfg, command, bridge, reverseBridge, LinuxSandboxOptions{
+		UseLandlock: true, // Enabled by default, will fall back if not available
+		UseSeccomp:  true, // Enabled by default
+		UseEBPF:     true, // Enabled by default if available
+		Debug:       debug,
+	})
+}
+
+// WrapCommandLinuxWithOptions wraps a command with configurable sandbox options.
+func WrapCommandLinuxWithOptions(cfg *config.Config, command string, bridge *LinuxBridge, reverseBridge *ReverseBridge, opts LinuxSandboxOptions) (string, error) {
 	if _, err := exec.LookPath("bwrap"); err != nil {
 		return "", fmt.Errorf("bubblewrap (bwrap) is required on Linux but not found: %w", err)
 	}
@@ -241,6 +269,11 @@ func WrapCommandLinux(cfg *config.Config, command string, bridge *LinuxBridge, r
 	}
 
 	cwd, _ := os.Getwd()
+	features := DetectLinuxFeatures()
+
+	if opts.Debug {
+		fmt.Fprintf(os.Stderr, "[fence:linux] Available features: %s\n", features.Summary())
+	}
 
 	// Build bwrap args with filesystem restrictions
 	bwrapArgs := []string{
@@ -249,6 +282,25 @@ func WrapCommandLinux(cfg *config.Config, command string, bridge *LinuxBridge, r
 		"--die-with-parent",
 		"--unshare-net", // Network namespace isolation
 		"--unshare-pid", // PID namespace isolation
+	}
+
+	// Generate seccomp filter if available and requested
+	var seccompFilterPath string
+	if opts.UseSeccomp && features.HasSeccomp {
+		filter := NewSeccompFilter(opts.Debug)
+		filterPath, err := filter.GenerateBPFFilter()
+		if err != nil {
+			if opts.Debug {
+				fmt.Fprintf(os.Stderr, "[fence:linux] Seccomp filter generation failed: %v\n", err)
+			}
+		} else {
+			seccompFilterPath = filterPath
+			if opts.Debug {
+				fmt.Fprintf(os.Stderr, "[fence:linux] Seccomp filter enabled (blocking %d dangerous syscalls)\n", len(DangerousSyscalls))
+			}
+			// Add seccomp filter via fd 3 (will be set up via shell redirection)
+			bwrapArgs = append(bwrapArgs, "--seccomp", "3")
+		}
 	}
 
 	// Start with read-only root filesystem (default deny writes)
@@ -274,6 +326,12 @@ func WrapCommandLinux(cfg *config.Config, command string, bridge *LinuxBridge, r
 
 	// Add user-specified allowWrite paths
 	if cfg != nil && cfg.Filesystem.AllowWrite != nil {
+		expandedPaths := ExpandGlobPatterns(cfg.Filesystem.AllowWrite)
+		for _, p := range expandedPaths {
+			writablePaths[p] = true
+		}
+
+		// Add non-glob paths
 		for _, p := range cfg.Filesystem.AllowWrite {
 			normalized := NormalizePath(p)
 			if !ContainsGlobChars(normalized) {
@@ -291,6 +349,14 @@ func WrapCommandLinux(cfg *config.Config, command string, bridge *LinuxBridge, r
 
 	// Handle denyRead paths - hide them with tmpfs
 	if cfg != nil && cfg.Filesystem.DenyRead != nil {
+		expandedDenyRead := ExpandGlobPatterns(cfg.Filesystem.DenyRead)
+		for _, p := range expandedDenyRead {
+			if fileExists(p) {
+				bwrapArgs = append(bwrapArgs, "--tmpfs", p)
+			}
+		}
+
+		// Add non-glob paths
 		for _, p := range cfg.Filesystem.DenyRead {
 			normalized := NormalizePath(p)
 			if !ContainsGlobChars(normalized) && fileExists(normalized) {
@@ -302,17 +368,36 @@ func WrapCommandLinux(cfg *config.Config, command string, bridge *LinuxBridge, r
 	// Apply mandatory deny patterns (make dangerous files/dirs read-only)
 	// This overrides any writable mounts for these paths
 	mandatoryDeny := getMandatoryDenyPaths(cwd)
+
+	// Expand glob patterns for mandatory deny
+	allowGitConfig := cfg != nil && cfg.Filesystem.AllowGitConfig
+	mandatoryGlobs := GetMandatoryDenyPatterns(cwd, allowGitConfig)
+	expandedMandatory := ExpandGlobPatterns(mandatoryGlobs)
+	mandatoryDeny = append(mandatoryDeny, expandedMandatory...)
+
+	// Deduplicate
+	seen := make(map[string]bool)
 	for _, p := range mandatoryDeny {
-		if fileExists(p) {
+		if !seen[p] && fileExists(p) {
+			seen[p] = true
 			bwrapArgs = append(bwrapArgs, "--ro-bind", p, p)
 		}
 	}
 
 	// Handle explicit denyWrite paths (make them read-only)
 	if cfg != nil && cfg.Filesystem.DenyWrite != nil {
+		expandedDenyWrite := ExpandGlobPatterns(cfg.Filesystem.DenyWrite)
+		for _, p := range expandedDenyWrite {
+			if fileExists(p) && !seen[p] {
+				seen[p] = true
+				bwrapArgs = append(bwrapArgs, "--ro-bind", p, p)
+			}
+		}
+		// Add non-glob paths
 		for _, p := range cfg.Filesystem.DenyWrite {
 			normalized := NormalizePath(p)
-			if !ContainsGlobChars(normalized) && fileExists(normalized) {
+			if !ContainsGlobChars(normalized) && fileExists(normalized) && !seen[normalized] {
+				seen[normalized] = true
 				bwrapArgs = append(bwrapArgs, "--ro-bind", normalized, normalized)
 			}
 		}
@@ -331,6 +416,14 @@ func WrapCommandLinux(cfg *config.Config, command string, bridge *LinuxBridge, r
 		// Get the temp directory containing the reverse sockets
 		tmpDir := filepath.Dir(reverseBridge.SocketPaths[0])
 		bwrapArgs = append(bwrapArgs, "--bind", tmpDir, tmpDir)
+	}
+
+	// Get fence executable path for Landlock wrapper
+	fenceExePath, _ := os.Executable()
+	useLandlockWrapper := opts.UseLandlock && features.CanUseLandlock() && fenceExePath != ""
+	if useLandlockWrapper {
+		// Ensure fence binary is accessible inside the sandbox (it should be via ro-bind /)
+		// We'll call it at the end of the script to apply Landlock before running user command
 	}
 
 	bwrapArgs = append(bwrapArgs, "--", shellPath, "-c")
@@ -391,18 +484,155 @@ sleep 0.1
 
 # Run the user command
 `)
-	innerScript.WriteString(command)
-	innerScript.WriteString("\n")
+
+	// Use Landlock wrapper if available
+	if useLandlockWrapper {
+		// Pass config via environment variable (serialized as JSON)
+		// This ensures allowWrite/denyWrite rules are properly applied
+		if cfg != nil {
+			configJSON, err := json.Marshal(cfg)
+			if err == nil {
+				innerScript.WriteString(fmt.Sprintf("export FENCE_CONFIG_JSON=%s\n", ShellQuoteSingle(string(configJSON))))
+			}
+		}
+
+		// Build wrapper command with proper quoting
+		// Use bash -c to preserve shell semantics (e.g., "echo hi && ls")
+		wrapperArgs := []string{fenceExePath, "--landlock-apply"}
+		if opts.Debug {
+			wrapperArgs = append(wrapperArgs, "--debug")
+		}
+		wrapperArgs = append(wrapperArgs, "--", "bash", "-c", command)
+
+		// Use exec to replace bash with the wrapper (which will exec the command)
+		innerScript.WriteString(fmt.Sprintf("exec %s\n", ShellQuote(wrapperArgs)))
+	} else {
+		innerScript.WriteString(command)
+		innerScript.WriteString("\n")
+	}
 
 	bwrapArgs = append(bwrapArgs, innerScript.String())
 
-	if debug {
-		features := []string{"network filtering", "filesystem restrictions"}
-		if reverseBridge != nil && len(reverseBridge.Ports) > 0 {
-			features = append(features, fmt.Sprintf("inbound ports: %v", reverseBridge.Ports))
+	if opts.Debug {
+		featureList := []string{"bwrap(network,pid,fs)"}
+		if features.HasSeccomp && opts.UseSeccomp && seccompFilterPath != "" {
+			featureList = append(featureList, "seccomp")
 		}
-		fmt.Fprintf(os.Stderr, "[fence:linux] Wrapping command with bwrap (%s)\n", strings.Join(features, ", "))
+		if useLandlockWrapper {
+			featureList = append(featureList, fmt.Sprintf("landlock-v%d(wrapper)", features.LandlockABI))
+		} else if features.CanUseLandlock() && opts.UseLandlock {
+			featureList = append(featureList, fmt.Sprintf("landlock-v%d(unavailable)", features.LandlockABI))
+		}
+		if reverseBridge != nil && len(reverseBridge.Ports) > 0 {
+			featureList = append(featureList, fmt.Sprintf("inbound:%v", reverseBridge.Ports))
+		}
+		fmt.Fprintf(os.Stderr, "[fence:linux] Sandbox: %s\n", strings.Join(featureList, ", "))
 	}
 
-	return ShellQuote(bwrapArgs), nil
+	// Build the final command
+	bwrapCmd := ShellQuote(bwrapArgs)
+
+	// If seccomp filter is enabled, wrap with fd redirection
+	// bwrap --seccomp expects the filter on the specified fd
+	if seccompFilterPath != "" {
+		// Open filter file on fd 3, then run bwrap
+		// The filter file will be cleaned up after the sandbox exits
+		return fmt.Sprintf("exec 3<%s; %s", ShellQuoteSingle(seccompFilterPath), bwrapCmd), nil
+	}
+
+	return bwrapCmd, nil
+}
+
+// StartLinuxMonitor starts violation monitoring for a Linux sandbox.
+// Returns monitors that should be stopped when the sandbox exits.
+func StartLinuxMonitor(pid int, opts LinuxSandboxOptions) (*LinuxMonitors, error) {
+	monitors := &LinuxMonitors{}
+	features := DetectLinuxFeatures()
+
+	// Note: SeccompMonitor is disabled because our seccomp filter uses SECCOMP_RET_ERRNO
+	// which silently returns EPERM without logging to dmesg/audit.
+	// To enable seccomp logging, the filter would need to use SECCOMP_RET_LOG (allows syscall)
+	// or SECCOMP_RET_KILL (logs but kills process) or SECCOMP_RET_USER_NOTIF (complex).
+	// For now, we rely on the eBPF monitor to detect syscall failures.
+	if opts.Debug && opts.Monitor && features.SeccompLogLevel >= 1 {
+		fmt.Fprintf(os.Stderr, "[fence:linux] Note: seccomp violations are blocked but not logged (SECCOMP_RET_ERRNO is silent)\n")
+	}
+
+	// Start eBPF monitor if available and requested
+	// This monitors syscalls that return EACCES/EPERM for sandbox descendants
+	if opts.Monitor && opts.UseEBPF && features.HasEBPF {
+		ebpfMon := NewEBPFMonitor(pid, opts.Debug)
+		if err := ebpfMon.Start(); err != nil {
+			if opts.Debug {
+				fmt.Fprintf(os.Stderr, "[fence:linux] Failed to start eBPF monitor: %v\n", err)
+			}
+		} else {
+			monitors.EBPFMonitor = ebpfMon
+			if opts.Debug {
+				fmt.Fprintf(os.Stderr, "[fence:linux] eBPF monitor started for PID %d\n", pid)
+			}
+		}
+	} else if opts.Monitor && opts.Debug {
+		if !features.HasEBPF {
+			fmt.Fprintf(os.Stderr, "[fence:linux] eBPF monitoring not available (need CAP_BPF or root)\n")
+		}
+	}
+
+	return monitors, nil
+}
+
+// LinuxMonitors holds all active monitors for a Linux sandbox.
+type LinuxMonitors struct {
+	EBPFMonitor *EBPFMonitor
+}
+
+// Stop stops all monitors.
+func (m *LinuxMonitors) Stop() {
+	if m.EBPFMonitor != nil {
+		m.EBPFMonitor.Stop()
+	}
+}
+
+// PrintLinuxFeatures prints available Linux sandbox features.
+func PrintLinuxFeatures() {
+	features := DetectLinuxFeatures()
+	fmt.Printf("Linux Sandbox Features:\n")
+	fmt.Printf("  Kernel: %d.%d\n", features.KernelMajor, features.KernelMinor)
+	fmt.Printf("  Bubblewrap (bwrap): %v\n", features.HasBwrap)
+	fmt.Printf("  Socat: %v\n", features.HasSocat)
+	fmt.Printf("  Seccomp: %v (log level: %d)\n", features.HasSeccomp, features.SeccompLogLevel)
+	fmt.Printf("  Landlock: %v (ABI v%d)\n", features.HasLandlock, features.LandlockABI)
+	fmt.Printf("  eBPF: %v (CAP_BPF: %v, root: %v)\n", features.HasEBPF, features.HasCapBPF, features.HasCapRoot)
+
+	fmt.Printf("\nFeature Status:\n")
+	if features.MinimumViable() {
+		fmt.Printf("  ✓ Minimum requirements met (bwrap + socat)\n")
+	} else {
+		fmt.Printf("  ✗ Missing requirements: ")
+		if !features.HasBwrap {
+			fmt.Printf("bwrap ")
+		}
+		if !features.HasSocat {
+			fmt.Printf("socat ")
+		}
+		fmt.Println()
+	}
+
+	if features.CanUseLandlock() {
+		fmt.Printf("  ✓ Landlock available for enhanced filesystem control\n")
+	} else {
+		fmt.Printf("  ○ Landlock not available (kernel 5.13+ required)\n")
+	}
+
+	if features.CanMonitorViolations() {
+		fmt.Printf("  ✓ Violation monitoring available\n")
+	} else {
+		fmt.Printf("  ○ Violation monitoring limited (kernel 4.14+ for seccomp logging)\n")
+	}
+
+	if features.HasEBPF {
+		fmt.Printf("  ✓ eBPF monitoring available (enhanced visibility)\n")
+	} else {
+		fmt.Printf("  ○ eBPF monitoring not available (needs CAP_BPF or root)\n")
+	}
 }

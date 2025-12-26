@@ -2,6 +2,7 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
@@ -11,6 +12,7 @@ import (
 	"syscall"
 
 	"github.com/Use-Tusk/fence/internal/config"
+	"github.com/Use-Tusk/fence/internal/platform"
 	"github.com/Use-Tusk/fence/internal/sandbox"
 	"github.com/spf13/cobra"
 )
@@ -23,16 +25,24 @@ var (
 )
 
 var (
-	debug        bool
-	monitor      bool
-	settingsPath string
-	cmdString    string
-	exposePorts  []string
-	exitCode     int
-	showVersion  bool
+	debug         bool
+	monitor       bool
+	settingsPath  string
+	cmdString     string
+	exposePorts   []string
+	exitCode      int
+	showVersion   bool
+	linuxFeatures bool
 )
 
 func main() {
+	// Check for internal --landlock-apply mode (used inside sandbox)
+	// This must be checked before cobra to avoid flag conflicts
+	if len(os.Args) >= 2 && os.Args[1] == "--landlock-apply" {
+		runLandlockWrapper()
+		return
+	}
+
 	rootCmd := &cobra.Command{
 		Use:   "fence [flags] -- [command...]",
 		Short: "Run commands in a sandbox with network and filesystem restrictions",
@@ -74,6 +84,7 @@ Configuration file format (~/.fence.json):
 	rootCmd.Flags().StringVarP(&cmdString, "c", "c", "", "Run command string directly (like sh -c)")
 	rootCmd.Flags().StringArrayVarP(&exposePorts, "port", "p", nil, "Expose port for inbound connections (can be used multiple times)")
 	rootCmd.Flags().BoolVarP(&showVersion, "version", "v", false, "Show version information")
+	rootCmd.Flags().BoolVar(&linuxFeatures, "linux-features", false, "Show available Linux security features and exit")
 
 	rootCmd.Flags().SetInterspersed(true)
 
@@ -90,6 +101,11 @@ func runCommand(cmd *cobra.Command, args []string) error {
 		fmt.Printf("  Version: %s\n", version)
 		fmt.Printf("  Built:   %s\n", buildTime)
 		fmt.Printf("  Commit:  %s\n", gitCommit)
+		return nil
+	}
+
+	if linuxFeatures {
+		sandbox.PrintLinuxFeatures()
 		return nil
 	}
 
@@ -174,6 +190,30 @@ func runCommand(cmd *cobra.Command, args []string) error {
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
 
+	// Start the command (non-blocking) so we can get the PID
+	if err := execCmd.Start(); err != nil {
+		return fmt.Errorf("failed to start command: %w", err)
+	}
+
+	// Start Linux monitors (eBPF tracing for filesystem violations)
+	var linuxMonitors *sandbox.LinuxMonitors
+	if monitor && execCmd.Process != nil {
+		linuxMonitors, _ = sandbox.StartLinuxMonitor(execCmd.Process.Pid, sandbox.LinuxSandboxOptions{
+			Monitor: true,
+			Debug:   debug,
+			UseEBPF: true,
+		})
+		if linuxMonitors != nil {
+			defer linuxMonitors.Stop()
+		}
+	}
+
+	// Note: Landlock is NOT applied here because:
+	// 1. The sandboxed command is already running (Landlock only affects future children)
+	// 2. Proper Landlock integration requires applying restrictions inside the sandbox
+	// For now, filesystem isolation relies on bwrap mount namespaces.
+	// Landlock code exists for future integration (e.g., via a wrapper binary).
+
 	go func() {
 		sig := <-sigChan
 		if execCmd.Process != nil {
@@ -182,7 +222,8 @@ func runCommand(cmd *cobra.Command, args []string) error {
 		// Give child time to exit, then cleanup will happen via defer
 	}()
 
-	if err := execCmd.Run(); err != nil {
+	// Wait for command to finish
+	if err := execCmd.Wait(); err != nil {
 		if exitErr, ok := err.(*exec.ExitError); ok {
 			// Set exit code but don't os.Exit() here - let deferred cleanup run
 			exitCode = exitErr.ExitCode()
@@ -192,4 +233,92 @@ func runCommand(cmd *cobra.Command, args []string) error {
 	}
 
 	return nil
+}
+
+// runLandlockWrapper runs in "wrapper mode" inside the sandbox.
+// It applies Landlock restrictions and then execs the user command.
+// Usage: fence --landlock-apply [--debug] -- <command...>
+// Config is passed via FENCE_CONFIG_JSON environment variable.
+func runLandlockWrapper() {
+	// Parse arguments: --landlock-apply [--debug] -- <command...>
+	args := os.Args[2:] // Skip "fence" and "--landlock-apply"
+
+	var debugMode bool
+	var cmdStart int
+
+	for i := 0; i < len(args); i++ {
+		switch args[i] {
+		case "--debug":
+			debugMode = true
+		case "--":
+			cmdStart = i + 1
+			goto parseCommand
+		default:
+			// Assume rest is the command
+			cmdStart = i
+			goto parseCommand
+		}
+	}
+
+parseCommand:
+	if cmdStart >= len(args) {
+		fmt.Fprintf(os.Stderr, "[fence:landlock-wrapper] Error: no command specified\n")
+		os.Exit(1)
+	}
+
+	command := args[cmdStart:]
+
+	if debugMode {
+		fmt.Fprintf(os.Stderr, "[fence:landlock-wrapper] Applying Landlock restrictions\n")
+	}
+
+	// Only apply Landlock on Linux
+	if platform.Detect() == platform.Linux {
+		// Load config from environment variable (passed by parent fence process)
+		var cfg *config.Config
+		if configJSON := os.Getenv("FENCE_CONFIG_JSON"); configJSON != "" {
+			cfg = &config.Config{}
+			if err := json.Unmarshal([]byte(configJSON), cfg); err != nil {
+				if debugMode {
+					fmt.Fprintf(os.Stderr, "[fence:landlock-wrapper] Warning: failed to parse config: %v\n", err)
+				}
+				cfg = nil
+			}
+		}
+		if cfg == nil {
+			cfg = config.Default()
+		}
+
+		// Get current working directory for relative path resolution
+		cwd, _ := os.Getwd()
+
+		// Apply Landlock restrictions
+		err := sandbox.ApplyLandlockFromConfig(cfg, cwd, nil, debugMode)
+		if err != nil {
+			if debugMode {
+				fmt.Fprintf(os.Stderr, "[fence:landlock-wrapper] Warning: Landlock not applied: %v\n", err)
+			}
+			// Continue without Landlock - bwrap still provides isolation
+		} else if debugMode {
+			fmt.Fprintf(os.Stderr, "[fence:landlock-wrapper] Landlock restrictions applied\n")
+		}
+	}
+
+	// Find the executable
+	execPath, err := exec.LookPath(command[0])
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "[fence:landlock-wrapper] Error: command not found: %s\n", command[0])
+		os.Exit(127)
+	}
+
+	if debugMode {
+		fmt.Fprintf(os.Stderr, "[fence:landlock-wrapper] Exec: %s %v\n", execPath, command[1:])
+	}
+
+	// Exec the command (replaces this process)
+	err = syscall.Exec(execPath, command, os.Environ()) //nolint:gosec
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "[fence:landlock-wrapper] Exec failed: %v\n", err)
+		os.Exit(1)
+	}
 }
