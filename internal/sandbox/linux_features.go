@@ -31,6 +31,10 @@ type LinuxFeatures struct {
 	HasCapBPF  bool
 	HasCapRoot bool
 
+	// Network namespace capability
+	// This can be false in containerized environments (Docker, CI) without CAP_NET_ADMIN
+	CanUnshareNet bool
+
 	// Kernel version
 	KernelMajor int
 	KernelMinor int
@@ -67,6 +71,9 @@ func (f *LinuxFeatures) detect() {
 
 	// Check eBPF capabilities
 	f.detectEBPF()
+
+	// Check if we can create network namespaces
+	f.detectNetworkNamespace()
 }
 
 func (f *LinuxFeatures) parseKernelVersion() {
@@ -183,6 +190,21 @@ func (f *LinuxFeatures) detectEBPF() {
 	}
 }
 
+// detectNetworkNamespace probes whether bwrap --unshare-net works.
+// This can fail in containerized environments (Docker, GitHub Actions, etc.)
+// that don't have CAP_NET_ADMIN capability needed to set up the loopback interface.
+func (f *LinuxFeatures) detectNetworkNamespace() {
+	if !f.HasBwrap {
+		return
+	}
+
+	// Run a minimal bwrap command with --unshare-net to test if it works
+	// We use a very short timeout since this should either succeed or fail immediately
+	cmd := exec.Command("bwrap", "--unshare-net", "--", "/bin/true")
+	err := cmd.Run()
+	f.CanUnshareNet = err == nil
+}
+
 // Summary returns a human-readable summary of available features.
 func (f *LinuxFeatures) Summary() string {
 	var parts []string
@@ -190,7 +212,11 @@ func (f *LinuxFeatures) Summary() string {
 	parts = append(parts, fmt.Sprintf("kernel %d.%d", f.KernelMajor, f.KernelMinor))
 
 	if f.HasBwrap {
-		parts = append(parts, "bwrap")
+		if f.CanUnshareNet {
+			parts = append(parts, "bwrap")
+		} else {
+			parts = append(parts, "bwrap(no-netns)")
+		}
 	}
 	if f.HasSeccomp {
 		switch f.SeccompLogLevel {

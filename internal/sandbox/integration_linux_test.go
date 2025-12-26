@@ -22,7 +22,7 @@ func TestLinux_LandlockBlocksWriteOutsideWorkspace(t *testing.T) {
 
 	workspace := createTempWorkspace(t)
 	outsideFile := "/tmp/fence-test-outside-" + filepath.Base(workspace) + ".txt"
-	defer os.Remove(outsideFile)
+	defer func() { _ = os.Remove(outsideFile) }()
 
 	cfg := testConfigWithWorkspace(workspace)
 
@@ -45,7 +45,7 @@ func TestLinux_LandlockAllowsWriteInWorkspace(t *testing.T) {
 	assertFileExists(t, filepath.Join(workspace, "allowed.txt"))
 
 	// Verify content was written
-	content, err := os.ReadFile(filepath.Join(workspace, "allowed.txt"))
+	content, err := os.ReadFile(filepath.Join(workspace, "allowed.txt")) //nolint:gosec
 	if err != nil {
 		t.Fatalf("failed to read file: %v", err)
 	}
@@ -67,7 +67,7 @@ func TestLinux_LandlockProtectsGitHooks(t *testing.T) {
 
 	assertBlocked(t, result)
 	// Hook file should not exist or should be empty
-	if content, err := os.ReadFile(hookPath); err == nil && strings.Contains(string(content), "malicious") {
+	if content, err := os.ReadFile(hookPath); err == nil && strings.Contains(string(content), "malicious") { //nolint:gosec
 		t.Errorf("malicious content should not have been written to git hook")
 	}
 }
@@ -83,14 +83,14 @@ func TestLinux_LandlockProtectsGitConfig(t *testing.T) {
 	cfg.Filesystem.AllowGitConfig = false
 
 	configPath := filepath.Join(workspace, ".git", "config")
-	originalContent, _ := os.ReadFile(configPath)
+	originalContent, _ := os.ReadFile(configPath) //nolint:gosec
 
 	result := runUnderSandbox(t, cfg, "echo 'malicious=true' >> "+configPath, workspace)
 
 	assertBlocked(t, result)
 
 	// Verify content wasn't modified
-	newContent, _ := os.ReadFile(configPath)
+	newContent, _ := os.ReadFile(configPath) //nolint:gosec
 	if strings.Contains(string(newContent), "malicious") {
 		t.Errorf("git config should not have been modified")
 	}
@@ -135,7 +135,7 @@ func TestLinux_LandlockProtectsBashrc(t *testing.T) {
 
 	assertBlocked(t, result)
 
-	content, _ := os.ReadFile(bashrcPath)
+	content, _ := os.ReadFile(bashrcPath) //nolint:gosec
 	if strings.Contains(string(content), "malicious") {
 		t.Errorf(".bashrc should be protected from writes")
 	}
@@ -179,10 +179,10 @@ func TestLinux_LandlockAllowsTmpFence(t *testing.T) {
 	cfg := testConfigWithWorkspace(workspace)
 
 	// Ensure /tmp/fence exists
-	os.MkdirAll("/tmp/fence", 0o755)
+	_ = os.MkdirAll("/tmp/fence", 0o750)
 
 	testFile := "/tmp/fence/test-file-" + filepath.Base(workspace)
-	defer os.Remove(testFile)
+	defer func() { _ = os.Remove(testFile) }()
 
 	result := runUnderSandbox(t, cfg, "echo 'test' > "+testFile, workspace)
 
@@ -390,7 +390,7 @@ func TestLinux_SymlinkEscapeBlocked(t *testing.T) {
 
 	// Create a symlink pointing outside the workspace
 	symlinkPath := filepath.Join(workspace, "escape")
-	os.Symlink("/etc", symlinkPath)
+	_ = os.Symlink("/etc", symlinkPath)
 
 	// Try to write through the symlink
 	result := runUnderSandbox(t, cfg, "echo 'test' > "+symlinkPath+"/fence-test", workspace)

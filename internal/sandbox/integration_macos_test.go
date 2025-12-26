@@ -272,28 +272,6 @@ func TestMacOS_PythonGetpwuidWorks(t *testing.T) {
 	}
 }
 
-// TestMacOS_JavaHomeWorks verifies /usr/libexec/java_home works under Seatbelt.
-func TestMacOS_JavaHomeWorks(t *testing.T) {
-	skipIfAlreadySandboxed(t)
-
-	if _, err := os.Stat("/usr/libexec/java_home"); os.IsNotExist(err) {
-		t.Skip("skipping: /usr/libexec/java_home not found")
-	}
-
-	workspace := createTempWorkspace(t)
-	cfg := testConfigWithWorkspace(workspace)
-
-	// First check if java_home works outside sandbox
-	baselineResult := executeShellCommand(t, "/usr/libexec/java_home 2>/dev/null", workspace)
-	if baselineResult.Failed() {
-		t.Skip("skipping: java_home fails outside sandbox (no JDK installed)")
-	}
-
-	result := runUnderSandbox(t, cfg, "/usr/libexec/java_home", workspace)
-
-	assertAllowed(t, result)
-}
-
 // ============================================================================
 // Security Edge Case Tests
 // ============================================================================

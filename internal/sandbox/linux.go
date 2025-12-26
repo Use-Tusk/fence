@@ -280,9 +280,17 @@ func WrapCommandLinuxWithOptions(cfg *config.Config, command string, bridge *Lin
 		"bwrap",
 		"--new-session",
 		"--die-with-parent",
-		"--unshare-net", // Network namespace isolation
-		"--unshare-pid", // PID namespace isolation
 	}
+
+	// Only use --unshare-net if the environment supports it
+	// Containerized environments (Docker, CI) often lack CAP_NET_ADMIN
+	if features.CanUnshareNet {
+		bwrapArgs = append(bwrapArgs, "--unshare-net") // Network namespace isolation
+	} else if opts.Debug {
+		fmt.Fprintf(os.Stderr, "[fence:linux] Skipping --unshare-net (network namespace unavailable in this environment)\n")
+	}
+
+	bwrapArgs = append(bwrapArgs, "--unshare-pid") // PID namespace isolation
 
 	// Generate seccomp filter if available and requested
 	var seccompFilterPath string
@@ -510,7 +518,12 @@ sleep 0.1
 	bwrapArgs = append(bwrapArgs, innerScript.String())
 
 	if opts.Debug {
-		featureList := []string{"bwrap(network,pid,fs)"}
+		var featureList []string
+		if features.CanUnshareNet {
+			featureList = append(featureList, "bwrap(network,pid,fs)")
+		} else {
+			featureList = append(featureList, "bwrap(pid,fs)")
+		}
 		if features.HasSeccomp && opts.UseSeccomp && seccompFilterPath != "" {
 			featureList = append(featureList, "seccomp")
 		}
@@ -596,6 +609,7 @@ func PrintLinuxFeatures() {
 	fmt.Printf("  Kernel: %d.%d\n", features.KernelMajor, features.KernelMinor)
 	fmt.Printf("  Bubblewrap (bwrap): %v\n", features.HasBwrap)
 	fmt.Printf("  Socat: %v\n", features.HasSocat)
+	fmt.Printf("  Network namespace (--unshare-net): %v\n", features.CanUnshareNet)
 	fmt.Printf("  Seccomp: %v (log level: %d)\n", features.HasSeccomp, features.SeccompLogLevel)
 	fmt.Printf("  Landlock: %v (ABI v%d)\n", features.HasLandlock, features.LandlockABI)
 	fmt.Printf("  eBPF: %v (CAP_BPF: %v, root: %v)\n", features.HasEBPF, features.HasCapBPF, features.HasCapRoot)
@@ -612,6 +626,14 @@ func PrintLinuxFeatures() {
 			fmt.Printf("socat ")
 		}
 		fmt.Println()
+	}
+
+	if features.CanUnshareNet {
+		fmt.Printf("  ✓ Network namespace isolation available\n")
+	} else if features.HasBwrap {
+		fmt.Printf("  ⚠ Network namespace unavailable (containerized environment?)\n")
+		fmt.Printf("    Sandbox will still work but with reduced network isolation.\n")
+		fmt.Printf("    This is common in Docker, GitHub Actions, and other CI systems.\n")
 	}
 
 	if features.CanUseLandlock() {
