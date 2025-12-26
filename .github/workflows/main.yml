@@ -154,7 +154,7 @@ jobs:
           sandbox-exec -p '(version 1)(allow default)' /bin/echo "sandbox-exec works"
 
       - name: Run unit and integration tests
-        run: sudo -E make test-ci
+        run: make test-ci
 
       - name: Build binary for smoke tests
         run: make build-ci

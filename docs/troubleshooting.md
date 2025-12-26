@@ -50,6 +50,33 @@ Look for "Network namespace (--unshare-net): true/false"
 
 4. **On Ubuntu 24.04+**, you may need to modify AppArmor profiles (see [Ubuntu bug 2069526](https://bugs.launchpad.net/bugs/2069526)).
 
+## "bwrap: setting up uid map: Permission denied" (Linux)
+
+This error occurs when bwrap cannot create user namespaces. This typically happens when:
+
+- The `uidmap` package is not installed
+- `/etc/subuid` and `/etc/subgid` are not configured for your user
+- bwrap is not setuid
+
+**Quick fix (if you have root access):**
+
+```bash
+# Install uidmap
+sudo apt install uidmap  # Debian/Ubuntu
+
+# Make bwrap setuid
+sudo chmod u+s $(which bwrap)
+```
+
+**Or configure subuid/subgid for your user:**
+
+```bash
+echo "$(whoami):100000:65536" | sudo tee -a /etc/subuid
+echo "$(whoami):100000:65536" | sudo tee -a /etc/subgid
+```
+
+On most systems with package-manager-installed bwrap, this error shouldn't occur. If it does, your system may have non-standard security policies.
+
 ## "curl: (56) CONNECT tunnel failed, response 403"
 
 This usually means:
