@@ -90,6 +90,8 @@ jobs:
           # Configure subuid/subgid for the runner user (required for unprivileged user namespaces)
           echo "$(whoami):100000:65536" | sudo tee -a /etc/subuid
           echo "$(whoami):100000:65536" | sudo tee -a /etc/subgid
+          # Make bwrap setuid so it can create namespaces as non-root user
+          sudo chmod u+s $(which bwrap)
 
       - name: Verify sandbox dependencies
         run: |
@@ -100,8 +102,11 @@ jobs:
           echo "Kernel version: $(uname -r)"
           echo "uidmap installed: $(which newuidmap 2>/dev/null && echo yes || echo no)"
           echo "subuid configured: $(grep $(whoami) /etc/subuid 2>/dev/null || echo 'not configured')"
+          echo "bwrap setuid: $(ls -la $(which bwrap) | grep -q '^-rws' && echo yes || echo no)"
           echo "=== Testing bwrap basic functionality ==="
-          bwrap --ro-bind / / -- /bin/echo "bwrap works!" || echo "bwrap test failed"
+          bwrap --ro-bind / / -- /bin/echo "bwrap works!"
+          echo "=== Testing bwrap with user namespace ==="
+          bwrap --ro-bind / / --unshare-user --uid 0 --gid 0 -- /bin/echo "bwrap user namespace works!"
 
       - name: Run unit and integration tests
         run: make test-ci
