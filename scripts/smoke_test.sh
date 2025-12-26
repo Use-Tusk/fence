@@ -130,8 +130,8 @@ cat > "$SETTINGS_FILE" << EOF
 }
 EOF
 
-# Note: Fence blocks writes outside workspace + /tmp/fence
-OUTSIDE_FILE="/tmp/outside-fence-test-$$.txt"
+# Note: Use /var/tmp since /tmp is mounted as tmpfs (writable but ephemeral) inside the sandbox
+OUTSIDE_FILE="/var/tmp/outside-fence-test-$$.txt"
 run_test "write outside workspace blocked" "fail" "$FENCE_BIN" -s "$SETTINGS_FILE" -c "touch $OUTSIDE_FILE"
 
 # Cleanup in case it wasn't blocked

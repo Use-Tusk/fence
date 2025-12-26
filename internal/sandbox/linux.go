@@ -315,7 +315,9 @@ func WrapCommandLinuxWithOptions(cfg *config.Config, command string, bridge *Lin
 	bwrapArgs = append(bwrapArgs, "--ro-bind", "/", "/")
 
 	// Mount special filesystems
-	bwrapArgs = append(bwrapArgs, "--dev", "/dev")
+	// Use --dev-bind for /dev instead of --dev to preserve host device permissions
+	// (the --dev minimal devtmpfs has permission issues when bwrap is setuid)
+	bwrapArgs = append(bwrapArgs, "--dev-bind", "/dev", "/dev")
 	bwrapArgs = append(bwrapArgs, "--proc", "/proc")
 
 	// /tmp needs to be writable for many programs

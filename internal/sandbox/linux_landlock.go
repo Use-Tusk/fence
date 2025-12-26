@@ -45,6 +45,7 @@ func ApplyLandlockFromConfig(cfg *config.Config, cwd string, socketPaths []strin
 	}
 
 	// Essential system paths - allow read+execute
+	// Note: /dev is handled separately with read+write for /dev/null, /dev/zero, etc.
 	systemReadPaths := []string{
 		"/usr",
 		"/lib",
@@ -54,7 +55,6 @@ func ApplyLandlockFromConfig(cfg *config.Config, cwd string, socketPaths []strin
 		"/sbin",
 		"/etc",
 		"/proc",
-		"/dev",
 		"/sys",
 		"/run",
 		"/var/lib",
@@ -87,6 +87,12 @@ func ApplyLandlockFromConfig(cfg *config.Config, cwd string, socketPaths []strin
 	// /tmp - allow read+write (many programs need this)
 	if err := ruleset.AllowReadWrite("/tmp"); err != nil && debug {
 		fmt.Fprintf(os.Stderr, "[fence:landlock] Warning: failed to add /tmp write path: %v\n", err)
+	}
+
+	// /dev needs read+write for /dev/null, /dev/zero, /dev/tty, etc.
+	// Landlock doesn't support rules on device files directly, so we allow the whole /dev
+	if err := ruleset.AllowReadWrite("/dev"); err != nil && debug {
+		fmt.Fprintf(os.Stderr, "[fence:landlock] Warning: failed to add /dev write path: %v\n", err)
 	}
 
 	// Socket paths for proxy communication
