@@ -83,9 +83,13 @@ jobs:
           sudo apt-get install -y \
             bubblewrap \
             socat \
+            uidmap \
             curl \
             netcat-openbsd \
             ripgrep
+          # Configure subuid/subgid for the runner user (required for unprivileged user namespaces)
+          echo "$(whoami):100000:65536" | sudo tee -a /etc/subuid
+          echo "$(whoami):100000:65536" | sudo tee -a /etc/subgid
 
       - name: Verify sandbox dependencies
         run: |
@@ -94,6 +98,10 @@ jobs:
           socat -V | head -1
           echo "User namespaces enabled: $(cat /proc/sys/kernel/unprivileged_userns_clone 2>/dev/null || echo 'check not available')"
           echo "Kernel version: $(uname -r)"
+          echo "uidmap installed: $(which newuidmap 2>/dev/null && echo yes || echo no)"
+          echo "subuid configured: $(grep $(whoami) /etc/subuid 2>/dev/null || echo 'not configured')"
+          echo "=== Testing bwrap basic functionality ==="
+          bwrap --ro-bind / / -- /bin/echo "bwrap works!" || echo "bwrap test failed"
 
       - name: Run unit and integration tests
         run: make test-ci
