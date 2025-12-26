@@ -280,9 +280,17 @@ func WrapCommandLinuxWithOptions(cfg *config.Config, command string, bridge *Lin
 		"bwrap",
 		"--new-session",
 		"--die-with-parent",
-		"--unshare-net", // Network namespace isolation
-		"--unshare-pid", // PID namespace isolation
 	}
+
+	// Only use --unshare-net if the environment supports it
+	// Containerized environments (Docker, CI) often lack CAP_NET_ADMIN
+	if features.CanUnshareNet {
+		bwrapArgs = append(bwrapArgs, "--unshare-net") // Network namespace isolation
+	} else if opts.Debug {
+		fmt.Fprintf(os.Stderr, "[fence:linux] Skipping --unshare-net (network namespace unavailable in this environment)\n")
+	}
+
+	bwrapArgs = append(bwrapArgs, "--unshare-pid") // PID namespace isolation
 
 	// Generate seccomp filter if available and requested
 	var seccompFilterPath string
@@ -307,7 +315,9 @@ func WrapCommandLinuxWithOptions(cfg *config.Config, command string, bridge *Lin
 	bwrapArgs = append(bwrapArgs, "--ro-bind", "/", "/")
 
 	// Mount special filesystems
-	bwrapArgs = append(bwrapArgs, "--dev", "/dev")
+	// Use --dev-bind for /dev instead of --dev to preserve host device permissions
+	// (the --dev minimal devtmpfs has permission issues when bwrap is setuid)
+	bwrapArgs = append(bwrapArgs, "--dev-bind", "/dev", "/dev")
 	bwrapArgs = append(bwrapArgs, "--proc", "/proc")
 
 	// /tmp needs to be writable for many programs
@@ -420,7 +430,14 @@ func WrapCommandLinuxWithOptions(cfg *config.Config, command string, bridge *Lin
 
 	// Get fence executable path for Landlock wrapper
 	fenceExePath, _ := os.Executable()
-	useLandlockWrapper := opts.UseLandlock && features.CanUseLandlock() && fenceExePath != ""
+	// Skip Landlock wrapper if executable is in /tmp (test binaries are built there)
+	// The wrapper won't work because --tmpfs /tmp hides the test binary
+	executableInTmp := strings.HasPrefix(fenceExePath, "/tmp/")
+	useLandlockWrapper := opts.UseLandlock && features.CanUseLandlock() && fenceExePath != "" && !executableInTmp
+
+	if opts.Debug && executableInTmp {
+		fmt.Fprintf(os.Stderr, "[fence:linux] Skipping Landlock wrapper (executable in /tmp, likely a test)\n")
+	}
 
 	bwrapArgs = append(bwrapArgs, "--", shellPath, "-c")
 
@@ -510,7 +527,12 @@ sleep 0.1
 	bwrapArgs = append(bwrapArgs, innerScript.String())
 
 	if opts.Debug {
-		featureList := []string{"bwrap(network,pid,fs)"}
+		var featureList []string
+		if features.CanUnshareNet {
+			featureList = append(featureList, "bwrap(network,pid,fs)")
+		} else {
+			featureList = append(featureList, "bwrap(pid,fs)")
+		}
 		if features.HasSeccomp && opts.UseSeccomp && seccompFilterPath != "" {
 			featureList = append(featureList, "seccomp")
 		}
@@ -596,6 +618,7 @@ func PrintLinuxFeatures() {
 	fmt.Printf("  Kernel: %d.%d\n", features.KernelMajor, features.KernelMinor)
 	fmt.Printf("  Bubblewrap (bwrap): %v\n", features.HasBwrap)
 	fmt.Printf("  Socat: %v\n", features.HasSocat)
+	fmt.Printf("  Network namespace (--unshare-net): %v\n", features.CanUnshareNet)
 	fmt.Printf("  Seccomp: %v (log level: %d)\n", features.HasSeccomp, features.SeccompLogLevel)
 	fmt.Printf("  Landlock: %v (ABI v%d)\n", features.HasLandlock, features.LandlockABI)
 	fmt.Printf("  eBPF: %v (CAP_BPF: %v, root: %v)\n", features.HasEBPF, features.HasCapBPF, features.HasCapRoot)
@@ -612,6 +635,14 @@ func PrintLinuxFeatures() {
 			fmt.Printf("socat ")
 		}
 		fmt.Println()
+	}
+
+	if features.CanUnshareNet {
+		fmt.Printf("  ✓ Network namespace isolation available\n")
+	} else if features.HasBwrap {
+		fmt.Printf("  ⚠ Network namespace unavailable (containerized environment?)\n")
+		fmt.Printf("    Sandbox will still work but with reduced network isolation.\n")
+		fmt.Printf("    This is common in Docker, GitHub Actions, and other CI systems.\n")
 	}
 
 	if features.CanUseLandlock() {

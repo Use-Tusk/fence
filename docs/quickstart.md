@@ -32,6 +32,17 @@ sudo dnf install bubblewrap socat
 sudo pacman -S bubblewrap socat
 ```
 
+### Do I need sudo to run fence?
+
+No, for most Linux systems. Fence works without root privileges because:
+
+- Package-manager-installed `bubblewrap` is typically already setuid
+- Fence detects available capabilities and adapts automatically
+
+If some features aren't available (like network namespaces in Docker/CI), fence falls back gracefully - you'll still get filesystem isolation, command blocking, and proxy-based network filtering.
+
+Run `fence --linux-features` to see what's available in your environment.
+
 ## Verify Installation
 
 ```bash

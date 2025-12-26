@@ -70,6 +70,17 @@ This provides **defense-in-depth**: both bwrap mounts AND Landlock kernel restri
 > [!NOTE]
 > The eBPF monitor uses PID-range filtering (`pid >= SANDBOX_PID`) to exclude pre-existing system processes. This significantly reduces noise but isn't perfect—processes spawned after the sandbox starts may still appear.
 
+### When network namespace is not available (containerized environments)
+
+- **Impact**: `--unshare-net` is skipped; network is not fully isolated
+- **Cause**: Running in Docker, GitHub Actions, or other environments without `CAP_NET_ADMIN`
+- **Fallback**: Proxy-based filtering still works; filesystem/PID/seccomp isolation still active
+- **Check**: Run `fence --linux-features` and look for "Network namespace (--unshare-net): false"
+- **Workaround**: Run with `sudo`, or in Docker use `--cap-add=NET_ADMIN`
+
+> [!NOTE]
+> This is the most common "reduced isolation" scenario. Fence automatically detects this at startup and adapts. See the troubleshooting guide for more details.
+
 ### When bwrap is not available
 
 - **Impact**: Cannot run fence on Linux
