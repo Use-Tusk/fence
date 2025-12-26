@@ -42,8 +42,8 @@ fi
 echo "Using fence binary: $FENCE_BIN"
 echo "=============================================="
 
-# Create temp workspace
-WORKSPACE=$(mktemp -d)
+# Create temp workspace in current directory (not /tmp, which gets overlaid by bwrap --tmpfs)
+WORKSPACE=$(mktemp -d -p .)
 trap "rm -rf $WORKSPACE" EXIT
 
 run_test() {
