@@ -59,6 +59,7 @@ func ApplyLandlockFromConfig(cfg *config.Config, cwd string, socketPaths []strin
 		"/run",
 		"/var/lib",
 		"/var/cache",
+		"/opt",
 	}
 
 	for _, p := range systemReadPaths {
