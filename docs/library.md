@@ -416,6 +416,38 @@ if err != nil {
 }
 ```
 
+## CLI vs Library Differences
+
+`WrapCommand` gives library callers the same core sandbox as the CLI: command
+policy preflight, macOS Seatbelt / Linux bubblewrap wrapping, proxy-based
+network filtering, and mandatory dangerous-path protection. A few things the
+`fence` CLI does around the wrapped command are not part of `WrapCommand`,
+so they differ when embedding:
+
+- **Environment hardening.** The CLI executes the wrapped command with a
+  hardened environment that strips library-injection variables (`LD_PRELOAD`,
+  `LD_LIBRARY_PATH`, `DYLD_INSERT_LIBRARIES`, ...). When you exec the wrapped
+  string yourself, strip these variables from the child environment.
+- **Linux Landlock layer.** In-sandbox Landlock rules are applied by
+  re-executing the Fence binary in an internal helper mode, which only works
+  when the running executable is the `fence` CLI. Library embedders skip the
+  Landlock layer; filesystem isolation still comes from bubblewrap mount
+  rules.
+- **`runtimeExecPolicy: "argv"` (Linux).** The argv-aware exec supervisor also
+  requires the `fence` CLI binary to host its helper modes. `WrapCommand`
+  returns an error for this policy in library mode; use the default `"path"`
+  policy instead.
+- **Violation monitoring.** The `monitor` flag on `NewManager` covers proxy
+  denials only. The CLI's `-m` additionally starts platform monitors (macOS
+  `log stream`, Linux eBPF) that are not exposed through the public API.
+- **Interactive sessions.** The CLI manages TTY foreground handoff, job
+  control, and signal forwarding around the wrapped command. Library callers
+  wire stdio themselves; `AllowPty` in config still controls whether PTY
+  allocation is permitted inside the sandbox.
+- **Config discovery.** The CLI auto-discovers the nearest
+  `fence.jsonc`/`fence.json` and applies `--template`. Library callers load
+  config explicitly (`LoadConfigResolved`, `ResolveConfigPath`).
+
 ## Platform Differences
 
 | Feature | macOS | Linux |
