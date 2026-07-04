@@ -416,6 +416,107 @@ if err != nil {
 }
 ```
 
+## Policy Checks (Preflight)
+
+The `Check*` functions evaluate a path, command, or URL against a config's
+policy without running anything - no `Manager`, no proxies, no sandbox. Use
+them when your program acts outside the sandbox (Go stdlib file tools, glob
+walkers, agent `read_file`/`write_file`/`web_fetch` tools) and you want the
+same fence.json to be the single source of truth for those operations too.
+
+```go
+func CheckReadPath(cfg *Config, path, cwd string) error
+func CheckWritePath(cfg *Config, path, cwd string) error
+func CheckCommand(cfg *Config, command string) error
+func CheckURL(cfg *Config, rawURL string) error
+```
+
+A `nil` error means the policy allows the operation. A non-nil error is a
+typed error describing the denial; use `errors.As` to inspect it.
+
+These are policy preflights, not enforcement. They check declared intent -
+the kernel-level sandbox and traffic-time proxies that wrapped commands get
+remain authoritative. The checkers exist so code paths that don't run
+through `WrapCommand` can honor the same policy. They are the same
+predicates Fence's hook integrations (Claude Code, Cursor, Hermes,
+Windsurf, ...) use to preflight declared tool inputs.
+
+### Filesystem
+
+`CheckReadPath` / `CheckWritePath` return `*fence.PathBlockedError` on deny:
+
+```go
+type PathBlockedError struct {
+    Path        string // cleaned absolute path that was evaluated
+    Op          PathOp // fence.PathOpRead or fence.PathOpWrite
+    MatchedRule string // the rule text that matched; empty for default-deny
+    Reason      string // "denyRead", "denyWrite", "dangerous path", "not in allowWrite", ...
+}
+```
+
+Relative paths resolve against `cwd`; pass `""` to require absolute paths.
+
+```go
+cfg, _ := fence.LoadConfigResolved(fence.ResolveDefaultConfigPath())
+
+if err := fence.CheckWritePath(cfg, req.Path, req.CWD); err != nil {
+    var blocked *fence.PathBlockedError
+    errors.As(err, &blocked)
+    return fmt.Sprintf("write blocked by policy: %s", blocked.Reason)
+}
+```
+
+Semantics match wrap-mode enforcement:
+
+- **Writes**: mandatory dangerous-path protection, then `denyWrite`, then
+  `allowWrite`, then default deny. An empty policy denies all writes.
+- **Reads**: `denyRead` always wins. Without `defaultDenyRead`, everything
+  else is readable. With `defaultDenyRead`, a path is readable when it
+  matches `allowRead`, `allowExecute`, `allowWrite` (which implies read), or
+  a default readable system path - unless `strictDenyRead` suppresses the
+  system paths.
+
+Caveats: paths are evaluated lexically (no symlink resolution of the
+target, no filesystem access), and only the config is consulted -
+manager-level additions like `ExposeHostPath` are not reflected.
+
+### Commands
+
+`CheckCommand` runs the same preflight `WrapCommand` performs: each
+sub-command in pipelines, `&&`/`||`/`;` chains, and nested `sh -c` patterns
+is checked against `command.deny`/`command.allow` (plus the built-in default
+deny list unless `useDefaults` is false), and ssh invocations are checked
+against the SSH policy. Denials are `*fence.CommandBlockedError` or
+`*fence.SSHBlockedError`.
+
+```go
+if err := fence.CheckCommand(cfg, "echo ok && git push origin main"); err != nil {
+    var blocked *fence.CommandBlockedError
+    if errors.As(err, &blocked) {
+        // blocked.Command = "git push origin main", blocked.BlockedPrefix = "git push"
+    }
+}
+```
+
+### Network URLs
+
+`CheckURL` checks a URL's host against `network.allowedDomains` /
+`network.deniedDomains`. Deny rules win; an empty `allowedDomains` denies
+everything; `"*"` allows any host not explicitly denied. Denials are
+`*fence.URLBlockedError` (URL, host, matched rule, reason).
+
+```go
+if err := fence.CheckURL(cfg, "https://internal.example.com/admin"); err != nil {
+    // err.Error() = `network access to "..." blocked: deniedDomains (matched "...")`
+}
+```
+
+`CheckURL` is strictly weaker than the traffic-time proxy enforcement
+wrapped commands get: it validates the declared URL only, so redirects,
+URLs embedded in query strings, and requests made by fetched content are
+not covered. Use it to preflight tools that fetch outside the sandbox, not
+as a substitute for wrapping them.
+
 ## CLI vs Library Differences
 
 `WrapCommand` gives library callers the same core sandbox as the CLI: command

@@ -9,19 +9,32 @@ import (
 	"github.com/fencesandbox/fence/internal/config"
 )
 
-// PathWriteBlockedError is returned when a write to a path is blocked.
-// Callers can `errors.As` to inspect MatchedRule.
-type PathWriteBlockedError struct {
+// PathOp identifies the filesystem operation a path check evaluates.
+type PathOp string
+
+const (
+	PathOpRead  PathOp = "read"
+	PathOpWrite PathOp = "write"
+)
+
+// PathBlockedError is returned when access to a path is blocked by the
+// filesystem policy. Callers can `errors.As` to inspect MatchedRule.
+type PathBlockedError struct {
 	Path        string
-	MatchedRule string // empty when default-deny ("not in allowWrite")
-	Reason      string // "denyWrite", "dangerous path", "not in allowWrite", ...
+	Op          PathOp // "read" or "write"
+	MatchedRule string // empty when default-deny ("not in allowWrite" / "not in allowRead")
+	Reason      string // "denyWrite", "denyRead", "dangerous path", "not in allowWrite", ...
 }
 
-func (e *PathWriteBlockedError) Error() string {
-	if e.MatchedRule == "" {
-		return fmt.Sprintf("write to %q blocked by sandbox filesystem policy: %s", e.Path, e.Reason)
+func (e *PathBlockedError) Error() string {
+	verb := "write to"
+	if e.Op == PathOpRead {
+		verb = "read of"
 	}
-	return fmt.Sprintf("write to %q blocked by sandbox filesystem policy: %s (matched %q)", e.Path, e.Reason, e.MatchedRule)
+	if e.MatchedRule == "" {
+		return fmt.Sprintf("%s %q blocked by sandbox filesystem policy: %s", verb, e.Path, e.Reason)
+	}
+	return fmt.Sprintf("%s %q blocked by sandbox filesystem policy: %s (matched %q)", verb, e.Path, e.Reason, e.MatchedRule)
 }
 
 // CheckWritePath is the hook-time predicate paralleling the wrap-mode profile
@@ -45,22 +58,78 @@ func CheckWritePath(path string, cwd string, cfg *config.Config) error {
 	}
 	clean, err := absoluteCleanPath(path, cwd)
 	if err != nil {
-		return &PathWriteBlockedError{Path: path, Reason: err.Error()}
+		return &PathBlockedError{Path: path, Op: PathOpWrite, Reason: err.Error()}
 	}
 
 	if rule, ok := matchesDangerousPath(clean); ok {
-		return &PathWriteBlockedError{Path: clean, MatchedRule: rule, Reason: "dangerous path"}
+		return &PathBlockedError{Path: clean, Op: PathOpWrite, MatchedRule: rule, Reason: "dangerous path"}
 	}
 
 	if rule, ok := matchPathRule(clean, cfg.Filesystem.DenyWrite); ok {
-		return &PathWriteBlockedError{Path: clean, MatchedRule: rule, Reason: "denyWrite"}
+		return &PathBlockedError{Path: clean, Op: PathOpWrite, MatchedRule: rule, Reason: "denyWrite"}
 	}
 
 	if _, ok := matchPathRule(clean, cfg.Filesystem.AllowWrite); ok {
 		return nil
 	}
 
-	return &PathWriteBlockedError{Path: clean, Reason: "not in allowWrite"}
+	return &PathBlockedError{Path: clean, Op: PathOpWrite, Reason: "not in allowWrite"}
+}
+
+// CheckReadPath is the read-side policy predicate paralleling the wrap-mode
+// profile generators. Precedence mirrors wrap mode:
+//
+//  1. denyRead always wins, in both read modes.
+//  2. Without defaultDenyRead (read-mostly mode), everything else is
+//     readable.
+//  3. With defaultDenyRead (implied by strictDenyRead), a path is readable
+//     when it matches allowRead, allowExecute, or allowWrite (allowWrite
+//     grants read), or one of the default readable system paths unless
+//     strictDenyRead suppresses those.
+//
+// Dangerous-path protection is intentionally absent here: it is a write
+// concept (shell startup files stay readable, just not writable).
+//
+// `cwd` is required when path is relative; pass "" to require absolute paths.
+func CheckReadPath(path string, cwd string, cfg *config.Config) error {
+	if cfg == nil {
+		cfg = config.Default()
+	}
+	clean, err := absoluteCleanPath(path, cwd)
+	if err != nil {
+		return &PathBlockedError{Path: path, Op: PathOpRead, Reason: err.Error()}
+	}
+
+	if rule, ok := matchPathRule(clean, cfg.Filesystem.DenyRead); ok {
+		return &PathBlockedError{Path: clean, Op: PathOpRead, MatchedRule: rule, Reason: "denyRead"}
+	}
+
+	// strictDenyRead implies defaultDenyRead; handle configs that were not
+	// run through config.Validate (which normalizes this).
+	defaultDenyRead := cfg.Filesystem.DefaultDenyRead || cfg.Filesystem.StrictDenyRead
+	if !defaultDenyRead {
+		return nil
+	}
+
+	if _, ok := matchPathRule(clean, cfg.Filesystem.AllowRead); ok {
+		return nil
+	}
+	if _, ok := matchPathRule(clean, cfg.Filesystem.AllowExecute); ok {
+		return nil
+	}
+	// allowWrite implies read (documented; Landlock grants read+write,
+	// Linux binds allowWrite paths read-write in defaultDenyRead mode).
+	if _, ok := matchPathRule(clean, cfg.Filesystem.AllowWrite); ok {
+		return nil
+	}
+
+	if !cfg.Filesystem.StrictDenyRead {
+		if _, ok := matchPathRule(clean, GetDefaultReadablePaths()); ok {
+			return nil
+		}
+	}
+
+	return &PathBlockedError{Path: clean, Op: PathOpRead, Reason: "not in allowRead"}
 }
 
 // absoluteCleanPath resolves path against cwd when relative. "../" escapes

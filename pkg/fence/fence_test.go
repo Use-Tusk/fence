@@ -1,6 +1,7 @@
 package fence
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -98,5 +99,148 @@ func TestPublicConfigSectionTypes(t *testing.T) {
 	}
 	if got := cfg.SSH.AllowedHosts[0]; got != "*.example.com" {
 		t.Fatalf("SSHConfig allowed host = %q, want %q", got, "*.example.com")
+	}
+}
+
+func TestCheckWritePath(t *testing.T) {
+	cfg := &Config{
+		Filesystem: FilesystemConfig{
+			AllowWrite: []string{"/workspace"},
+			DenyWrite:  []string{"/workspace/secrets"},
+		},
+	}
+
+	if err := CheckWritePath(cfg, "/workspace/main.go", ""); err != nil {
+		t.Fatalf("expected allowWrite path to pass, got %v", err)
+	}
+
+	err := CheckWritePath(cfg, "/workspace/secrets/db.json", "")
+	if err == nil {
+		t.Fatal("expected denyWrite to block")
+	}
+	var blocked *PathBlockedError
+	if !errors.As(err, &blocked) {
+		t.Fatalf("expected *PathBlockedError, got %T", err)
+	}
+	if blocked.Op != PathOpWrite || blocked.Reason != "denyWrite" || blocked.MatchedRule != "/workspace/secrets" {
+		t.Fatalf("unexpected error fields: %#v", blocked)
+	}
+}
+
+func TestCheckReadPath(t *testing.T) {
+	cfg := &Config{
+		Filesystem: FilesystemConfig{
+			DenyRead: []string{"~/.ssh"},
+		},
+	}
+
+	// Read-mostly mode: everything not deny-masked is readable.
+	if err := CheckReadPath(cfg, "/etc/hosts", ""); err != nil {
+		t.Fatalf("expected read-mostly mode to allow, got %v", err)
+	}
+
+	// strictDenyRead mode: only explicit allowRead entries are readable.
+	cfg = &Config{
+		Filesystem: FilesystemConfig{
+			DefaultDenyRead: true,
+			StrictDenyRead:  true,
+			AllowRead:       []string{"/workspace"},
+		},
+	}
+	if err := CheckReadPath(cfg, "./notes.txt", "/workspace"); err != nil {
+		t.Fatalf("expected allowRead path to pass, got %v", err)
+	}
+
+	err := CheckReadPath(cfg, "/usr/lib/something", "")
+	if err == nil {
+		t.Fatal("expected strictDenyRead to block system path")
+	}
+	var blocked *PathBlockedError
+	if !errors.As(err, &blocked) {
+		t.Fatalf("expected *PathBlockedError, got %T", err)
+	}
+	if blocked.Op != PathOpRead || blocked.Reason != "not in allowRead" {
+		t.Fatalf("unexpected error fields: %#v", blocked)
+	}
+}
+
+func TestCheckCommand(t *testing.T) {
+	useDefaults := false
+	cfg := &Config{
+		Command: CommandConfig{
+			Deny:        []string{"git push"},
+			UseDefaults: &useDefaults,
+		},
+	}
+
+	if err := CheckCommand(cfg, "git status"); err != nil {
+		t.Fatalf("expected allowed command to pass, got %v", err)
+	}
+
+	// Chained sub-commands are checked individually.
+	err := CheckCommand(cfg, "echo ok && git push origin main")
+	if err == nil {
+		t.Fatal("expected denied command to block")
+	}
+	var blocked *CommandBlockedError
+	if !errors.As(err, &blocked) {
+		t.Fatalf("expected *CommandBlockedError, got %T", err)
+	}
+	if blocked.BlockedPrefix != "git push" {
+		t.Fatalf("unexpected error fields: %#v", blocked)
+	}
+}
+
+func TestCheckCommand_SSHPolicy(t *testing.T) {
+	cfg := &Config{
+		SSH: SSHConfig{
+			AllowedHosts: []string{"*.example.com"},
+		},
+	}
+
+	if err := CheckCommand(cfg, "ssh deploy@web.example.com uptime"); err == nil {
+		// allowedCommands is empty → only interactive sessions allowed;
+		// a remote command must be blocked.
+		t.Fatal("expected remote command to be blocked by SSH policy")
+	}
+
+	err := CheckCommand(cfg, "ssh deploy@other.host.net")
+	if err == nil {
+		t.Fatal("expected disallowed host to be blocked")
+	}
+	var sshBlocked *SSHBlockedError
+	if !errors.As(err, &sshBlocked) {
+		t.Fatalf("expected *SSHBlockedError, got %T", err)
+	}
+}
+
+func TestCheckURL(t *testing.T) {
+	cfg := &Config{
+		Network: NetworkConfig{
+			AllowedDomains: []string{"*.example.com"},
+			DeniedDomains:  []string{"internal.example.com"},
+		},
+	}
+
+	if err := CheckURL(cfg, "https://api.example.com/v1/data"); err != nil {
+		t.Fatalf("expected allowed domain to pass, got %v", err)
+	}
+
+	// Deny rules win over allow rules.
+	err := CheckURL(cfg, "https://internal.example.com/admin")
+	if err == nil {
+		t.Fatal("expected denied domain to block")
+	}
+	var blocked *URLBlockedError
+	if !errors.As(err, &blocked) {
+		t.Fatalf("expected *URLBlockedError, got %T", err)
+	}
+	if blocked.Host != "internal.example.com" || blocked.Reason != "deniedDomains" || blocked.MatchedRule != "internal.example.com" {
+		t.Fatalf("unexpected error fields: %#v", blocked)
+	}
+
+	// Empty allowedDomains denies everything.
+	if err := CheckURL(&Config{}, "https://example.com/"); err == nil {
+		t.Fatal("expected empty policy to deny")
 	}
 }
