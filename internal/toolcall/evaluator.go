@@ -159,7 +159,7 @@ func commandDeny(value string, err error) Decision {
 
 func pathDeny(value string, err error) Decision {
 	d := Decision{Outcome: OutcomeDeny, Domain: DomainFilesystemWrite, Value: value, Reason: err.Error()}
-	var blocked *sandbox.PathWriteBlockedError
+	var blocked *sandbox.PathBlockedError
 	if errors.As(err, &blocked) {
 		d.MatchedRule = blocked.MatchedRule
 	}

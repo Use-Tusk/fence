@@ -4,6 +4,7 @@ package fence
 import (
 	"github.com/fencesandbox/fence/internal/config"
 	"github.com/fencesandbox/fence/internal/platform"
+	"github.com/fencesandbox/fence/internal/proxy"
 	"github.com/fencesandbox/fence/internal/sandbox"
 	"github.com/fencesandbox/fence/internal/templates"
 )
@@ -138,4 +139,85 @@ func ResolveDefaultConfigPath() string {
 // before the user default config path.
 func ResolveConfigPath(startDir string) (string, error) {
 	return config.ResolveConfigPath(startDir)
+}
+
+// PathOp identifies the filesystem operation a path check evaluates.
+type PathOp = sandbox.PathOp
+
+const (
+	PathOpRead  PathOp = sandbox.PathOpRead
+	PathOpWrite PathOp = sandbox.PathOpWrite
+)
+
+// PathBlockedError is the typed error returned by CheckReadPath and
+// CheckWritePath when a path is blocked. Use errors.As to inspect the
+// cleaned path, operation, matched rule, and reason.
+type PathBlockedError = sandbox.PathBlockedError
+
+// CheckReadPath reports whether cfg's filesystem policy permits reading
+// path. A nil error means the read is allowed; a non-nil error is always a
+// *PathBlockedError describing why it is denied.
+//
+// This is a policy preflight, not enforcement: it evaluates the same rules
+// the sandbox profile generators consume (denyRead, defaultDenyRead,
+// strictDenyRead, allowRead, allowExecute, allowWrite-implies-read, and the
+// default readable system paths), but it does not sandbox anything and the
+// kernel-level sandbox remains authoritative. It evaluates the declared
+// path lexically and does not resolve symlinks on the target.
+//
+// Relative paths resolve against cwd; pass "" to require absolute paths.
+func CheckReadPath(cfg *Config, path, cwd string) error {
+	return sandbox.CheckReadPath(path, cwd, cfg)
+}
+
+// CheckWritePath reports whether cfg's filesystem policy permits writing
+// path. A nil error means the write is allowed; a non-nil error is always a
+// *PathBlockedError describing why it is denied.
+//
+// Precedence matches wrap-mode enforcement: mandatory dangerous-path
+// protection, then denyWrite, then allowWrite, then default deny. Like
+// CheckReadPath, this is a policy preflight, not enforcement.
+//
+// Relative paths resolve against cwd; pass "" to require absolute paths.
+func CheckWritePath(cfg *Config, path, cwd string) error {
+	return sandbox.CheckWritePath(path, cwd, cfg)
+}
+
+// CommandBlockedError is the typed error returned by CheckCommand when a
+// command matches a deny rule. Use errors.As to inspect the offending
+// command and the deny prefix it matched.
+type CommandBlockedError = sandbox.CommandBlockedError
+
+// SSHBlockedError is the typed error returned by CheckCommand when an ssh
+// invocation violates the SSH policy (allowedHosts, allowedCommands, ...).
+type SSHBlockedError = sandbox.SSHBlockedError
+
+// CheckCommand reports whether cfg's command policy permits a shell
+// command. A nil error means the command is allowed; a non-nil error is a
+// *CommandBlockedError (or *SSHBlockedError for ssh policy violations).
+//
+// The parser understands pipelines, `&&`/`||`/`;` chains, and nested
+// `sh -c` / `bash -c` patterns, so each sub-command is checked — the same
+// preflight WrapCommand performs, without requiring a Manager or starting
+// any proxies.
+func CheckCommand(cfg *Config, command string) error {
+	return sandbox.CheckCommand(command, cfg)
+}
+
+// URLBlockedError is the typed error returned by CheckURL. Use errors.As
+// to inspect the URL, extracted host, matched rule, and reason.
+type URLBlockedError = proxy.URLBlockedError
+
+// CheckURL reports whether cfg's network policy permits a URL. A nil error
+// means the URL's host matches allowedDomains and not deniedDomains; an
+// empty allowedDomains denies everything. Deny rules win, and "*" in
+// allowedDomains allows any host not explicitly denied.
+//
+// This is an intent check on the declared URL, strictly weaker than the
+// traffic-time proxy enforcement wrapped commands get: redirects, embedded
+// URLs, and requests made by the fetched content are not covered. Use it
+// to preflight tools that fetch outside the sandbox, not as a substitute
+// for wrapping them.
+func CheckURL(cfg *Config, rawURL string) error {
+	return proxy.CheckURL(rawURL, cfg)
 }
