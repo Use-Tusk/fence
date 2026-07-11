@@ -25,6 +25,7 @@ func newHooksCmd() *cobra.Command {
 func newHooksPrintCmd() *cobra.Command {
 	var (
 		claude      bool
+		codex       bool
 		cursor      bool
 		opencode    bool
 		hermes      bool
@@ -40,6 +41,9 @@ func newHooksPrintCmd() *cobra.Command {
 Examples:
   fence hooks print --claude
   fence hooks print --claude --settings ./fence.json
+  fence hooks print --codex
+  fence hooks print --codex --template code
+  fence hooks print --codex --wrap
   fence hooks print --cursor --template code
   fence hooks print --opencode
   fence hooks print --hermes
@@ -50,10 +54,15 @@ Examples:
 			if err != nil {
 				return fmt.Errorf("failed to resolve hook policy options: %w", err)
 			}
+			if err := requireCodexOnlyWrap(codex, resolvedHookOptions); err != nil {
+				return err
+			}
 
 			switch {
 			case claude:
 				return writeClaudeHooksConfigWithOptions(cmd.OutOrStdout(), resolvedHookOptions)
+			case codex:
+				return writeCodexHooksConfigWithOptions(cmd.OutOrStdout(), resolvedHookOptions)
 			case cursor:
 				return writeCursorHooksConfigWithOptions(cmd.OutOrStdout(), resolvedHookOptions)
 			case opencode:
@@ -66,24 +75,26 @@ Examples:
 			case windsurf:
 				return writeWindsurfHooksConfigWithOptions(cmd.OutOrStdout(), resolvedHookOptions)
 			default:
-				return fmt.Errorf("no hook target specified. Use --claude, --cursor, --opencode, --hermes, or --windsurf")
+				return fmt.Errorf("no hook target specified. Use --claude, --codex, --cursor, --opencode, --hermes, or --windsurf")
 			}
 		},
 	}
 
 	cmd.Flags().BoolVar(&claude, "claude", false, "Print Claude Code hook config")
+	cmd.Flags().BoolVar(&codex, "codex", false, "Print Codex / ChatGPT Codex hook config")
 	cmd.Flags().BoolVar(&cursor, "cursor", false, "Print Cursor hook config")
 	cmd.Flags().BoolVar(&opencode, "opencode", false, "Print OpenCode plugin config")
 	cmd.Flags().BoolVar(&hermes, "hermes", false, "Print Hermes shell-hook config (~/.hermes/config.yaml)")
 	cmd.Flags().BoolVar(&windsurf, "windsurf", false, "Print Windsurf Cascade hook config")
 	addHookPolicyFlags(cmd, &hookOptions)
-	cmd.MarkFlagsMutuallyExclusive("claude", "cursor", "opencode", "hermes", "windsurf")
+	cmd.MarkFlagsMutuallyExclusive("claude", "codex", "cursor", "opencode", "hermes", "windsurf")
 	return cmd
 }
 
 func newHooksInstallCmd() *cobra.Command {
 	var (
 		claude      bool
+		codex       bool
 		cursor      bool
 		opencode    bool
 		hermes      bool
@@ -102,6 +113,9 @@ Examples:
   fence hooks install --claude
   fence hooks install --claude --file ./.claude/settings.json
   fence hooks install --claude --settings ./fence.json
+  fence hooks install --codex
+  fence hooks install --codex --template code --file ./.codex/hooks.json
+  fence hooks install --codex --wrap
   fence hooks install --cursor --template code --file ./.cursor/hooks.json
   fence hooks install --opencode
   fence hooks install --opencode --file ./opencode.json
@@ -110,12 +124,17 @@ Examples:
   fence hooks install --hermes --settings ./fence.json
   fence hooks install --hermes --file ./project-hermes-config.yaml
   fence hooks install --windsurf
-  fence hooks install --windsurf --file ./.windsurf/hooks.json`,
+  fence hooks install --windsurf --file ./.windsurf/hooks.json
+
+` + hooksFileFlagDefaultsHelp,
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			resolvedHookOptions, err := hookOptions.normalized()
 			if err != nil {
 				return fmt.Errorf("failed to resolve hook policy options: %w", err)
+			}
+			if err := requireCodexOnlyWrap(codex, resolvedHookOptions); err != nil {
+				return err
 			}
 
 			switch {
@@ -137,6 +156,40 @@ Examples:
 					}
 				} else {
 					if _, err := fmt.Fprintf(cmd.OutOrStdout(), "Claude hook already installed in %q\n", targetPath); err != nil {
+						return err
+					}
+				}
+				return nil
+			case codex:
+				targetPath := path
+				if targetPath == "" {
+					targetPath = defaultCodexHooksPath()
+				}
+				if targetPath == "" {
+					return fmt.Errorf("could not determine Codex hooks path")
+				}
+				changed, err := installCodexHookWithOptions(targetPath, resolvedHookOptions)
+				if err != nil {
+					return err
+				}
+				if changed {
+					if _, err := fmt.Fprintf(cmd.OutOrStdout(), "Installed Codex hook in %q\n", targetPath); err != nil {
+						return err
+					}
+					if _, err := fmt.Fprintln(cmd.ErrOrStderr(), "Note: Codex requires reviewing and trusting new hooks via /hooks before they run."); err != nil {
+						return err
+					}
+					if resolvedHookOptions.AllowWrap {
+						if _, err := fmt.Fprintln(cmd.ErrOrStderr(), "Note: --wrap rewrites allowed commands to fence -c. Use only when Codex's own sandbox is disabled; otherwise nested Fence cannot bind its proxy."); err != nil {
+							return err
+						}
+					} else {
+						if _, err := fmt.Fprintln(cmd.ErrOrStderr(), "Note: Codex hooks are intent-only by default (deny blocked commands). Pass --wrap only if Codex's sandbox is disabled and you want fence -c rewriting."); err != nil {
+							return err
+						}
+					}
+				} else {
+					if _, err := fmt.Fprintf(cmd.OutOrStdout(), "Codex hook already installed in %q\n", targetPath); err != nil {
 						return err
 					}
 				}
@@ -249,26 +302,28 @@ Examples:
 				}
 				return nil
 			default:
-				return fmt.Errorf("no hook target specified. Use --claude, --cursor, --opencode, --hermes, or --windsurf")
+				return fmt.Errorf("no hook target specified. Use --claude, --codex, --cursor, --opencode, --hermes, or --windsurf")
 			}
 		},
 	}
 
 	cmd.Flags().BoolVar(&claude, "claude", false, "Install Claude Code hook config")
+	cmd.Flags().BoolVar(&codex, "codex", false, "Install Codex / ChatGPT Codex hook config")
 	cmd.Flags().BoolVar(&cursor, "cursor", false, "Install Cursor hook config")
 	cmd.Flags().BoolVar(&opencode, "opencode", false, "Install OpenCode plugin config")
 	cmd.Flags().BoolVar(&hermes, "hermes", false, "Install Hermes shell-hook config")
 	cmd.Flags().BoolVar(&windsurf, "windsurf", false, "Install Windsurf Cascade hook config")
-	cmd.Flags().StringVarP(&path, "file", "f", "", "Path to the settings file to modify (default: ~/.claude/settings.json for --claude, ~/.cursor/hooks.json for --cursor, existing ~/.config/opencode/opencode.{jsonc,json} for --opencode, ~/.hermes/config.yaml for --hermes, ~/.codeium/windsurf/hooks.json for --windsurf)")
+	cmd.Flags().StringVarP(&path, "file", "f", "", "Path to the settings/hooks file to modify")
 	cmd.Flags().BoolVarP(&force, "force", "y", false, "Skip the confirmation prompt when comments would be stripped")
 	addHookPolicyFlags(cmd, &hookOptions)
-	cmd.MarkFlagsMutuallyExclusive("claude", "cursor", "opencode", "hermes", "windsurf")
+	cmd.MarkFlagsMutuallyExclusive("claude", "codex", "cursor", "opencode", "hermes", "windsurf")
 	return cmd
 }
 
 func newHooksUninstallCmd() *cobra.Command {
 	var (
 		claude   bool
+		codex    bool
 		cursor   bool
 		opencode bool
 		hermes   bool
@@ -285,11 +340,15 @@ func newHooksUninstallCmd() *cobra.Command {
 Examples:
   fence hooks uninstall --claude
   fence hooks uninstall --claude --file ./.claude/settings.json
+  fence hooks uninstall --codex
+  fence hooks uninstall --codex --file ./.codex/hooks.json
   fence hooks uninstall --cursor --file ./.cursor/hooks.json
   fence hooks uninstall --opencode
   fence hooks uninstall --opencode --force                          # skip prompt
   fence hooks uninstall --hermes
-  fence hooks uninstall --windsurf`,
+  fence hooks uninstall --windsurf
+
+` + hooksFileFlagDefaultsHelp,
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			switch {
@@ -311,6 +370,28 @@ Examples:
 					}
 				} else {
 					if _, err := fmt.Fprintf(cmd.OutOrStdout(), "Claude hook not present in %q\n", targetPath); err != nil {
+						return err
+					}
+				}
+				return nil
+			case codex:
+				targetPath := path
+				if targetPath == "" {
+					targetPath = defaultCodexHooksPath()
+				}
+				if targetPath == "" {
+					return fmt.Errorf("could not determine Codex hooks path")
+				}
+				changed, err := uninstallCodexHook(targetPath)
+				if err != nil {
+					return err
+				}
+				if changed {
+					if _, err := fmt.Fprintf(cmd.OutOrStdout(), "Removed Codex hook from %q\n", targetPath); err != nil {
+						return err
+					}
+				} else {
+					if _, err := fmt.Fprintf(cmd.OutOrStdout(), "Codex hook not present in %q\n", targetPath); err != nil {
 						return err
 					}
 				}
@@ -410,26 +491,43 @@ Examples:
 				}
 				return nil
 			default:
-				return fmt.Errorf("no hook target specified. Use --claude, --cursor, --opencode, --hermes, or --windsurf")
+				return fmt.Errorf("no hook target specified. Use --claude, --codex, --cursor, --opencode, --hermes, or --windsurf")
 			}
 		},
 	}
 
 	cmd.Flags().BoolVar(&claude, "claude", false, "Remove Claude Code hook config")
+	cmd.Flags().BoolVar(&codex, "codex", false, "Remove Codex / ChatGPT Codex hook config")
 	cmd.Flags().BoolVar(&cursor, "cursor", false, "Remove Cursor hook config")
 	cmd.Flags().BoolVar(&opencode, "opencode", false, "Remove OpenCode plugin config")
 	cmd.Flags().BoolVar(&hermes, "hermes", false, "Remove Hermes shell-hook config")
 	cmd.Flags().BoolVar(&windsurf, "windsurf", false, "Remove Windsurf Cascade hook config")
-	cmd.Flags().StringVarP(&path, "file", "f", "", "Path to the settings file to modify (default: ~/.claude/settings.json for --claude, ~/.cursor/hooks.json for --cursor, existing ~/.config/opencode/opencode.{jsonc,json} for --opencode, ~/.hermes/config.yaml for --hermes, ~/.codeium/windsurf/hooks.json for --windsurf)")
+	cmd.Flags().StringVarP(&path, "file", "f", "", "Path to the settings/hooks file to modify")
 	cmd.Flags().BoolVarP(&force, "force", "y", false, "Skip the confirmation prompt when comments would be stripped")
-	cmd.MarkFlagsMutuallyExclusive("claude", "cursor", "opencode", "hermes", "windsurf")
+	cmd.MarkFlagsMutuallyExclusive("claude", "codex", "cursor", "opencode", "hermes", "windsurf")
 	return cmd
 }
+
+const hooksFileFlagDefaultsHelp = `Default --file paths:
+  --claude    ~/.claude/settings.json
+  --codex     ~/.codex/hooks.json
+  --cursor    ~/.cursor/hooks.json
+  --opencode  existing ~/.config/opencode/opencode.{jsonc,json}
+  --hermes    ~/.hermes/config.yaml
+  --windsurf  ~/.codeium/windsurf/hooks.json`
 
 func addHookPolicyFlags(cmd *cobra.Command, hookOptions *hookFenceOptions) {
 	cmd.Flags().StringVar(&hookOptions.SettingsPath, "settings", "", "Pin hook policy checks to this Fence settings file")
 	cmd.Flags().StringVar(&hookOptions.TemplateName, "template", "", "Pin hook policy checks to this Fence template")
+	cmd.Flags().BoolVar(&hookOptions.AllowWrap, "wrap", false, "For --codex only: rewrite allowed commands to fence -c (requires Codex sandbox disabled)")
 	cmd.MarkFlagsMutuallyExclusive("settings", "template")
+}
+
+func requireCodexOnlyWrap(codex bool, hookOptions hookFenceOptions) error {
+	if hookOptions.AllowWrap && !codex {
+		return fmt.Errorf("--wrap is only supported with --codex")
+	}
+	return nil
 }
 
 // confirmJSONCCommentLossOrAbort warns and prompts when the pending OpenCode

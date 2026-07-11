@@ -16,6 +16,12 @@ func TestContainsHelperMode(t *testing.T) {
 			want:       true,
 		},
 		{
+			name:       "generated Codex hook",
+			command:    "fence --codex-pre-tool-use",
+			helperMode: codexPreToolUseMode,
+			want:       true,
+		},
+		{
 			name:       "absolute fence path with settings",
 			command:    `PATH=/tmp/bin /usr/local/bin/fence --claude-pre-tool-use --settings "/tmp/policy.json"`,
 			helperMode: claudePreToolUseMode,
@@ -43,6 +49,12 @@ func TestContainsHelperMode(t *testing.T) {
 			name:       "different executable",
 			command:    "other-fence --cursor-pre-tool-use",
 			helperMode: cursorPreToolUseMode,
+			want:       false,
+		},
+		{
+			name:       "codex mode does not match claude",
+			command:    "fence --codex-pre-tool-use",
+			helperMode: claudePreToolUseMode,
 			want:       false,
 		},
 	}

@@ -17,21 +17,23 @@ you also need multi-token command denies like `git push`, `gh repo create`, or
 | Integration | Hook surface | Command policy | Runtime network/filesystem for allowed shell commands | Preflights file/network tool inputs | Main caveat |
 |---|---|---|---|---|---|
 | Claude Code | `PreToolUse` for `Bash` | Denies blocked commands or rewrites allowed commands to `fence -c ...` | Yes, for hooked `Bash` commands | No | Covers shell tool calls, not native editor or agent file operations |
+| Codex | `PreToolUse` for `Bash` and `apply_patch` | Denies blocked commands (intent-only by default); optional `--wrap` rewrites to `fence -c ...` | Only with `--wrap` / `FENCE_CODEX_WRAP=1`, and only when Codex's own sandbox is disabled | No | Default Codex sandbox blocks nested Fence proxy binds; trust via `/hooks`; incomplete `unified_exec` interception |
 | Cursor | `preToolUse` for `Shell` | Denies blocked commands or rewrites allowed commands to `fence -c ...` | Yes, for hooked `Shell` commands | No | Covers Cursor shell tool calls, not arbitrary IDE behavior |
 | OpenCode | `tool.execute.before` plugin for `bash` | Denies blocked commands or rewrites allowed commands to `fence -c ...` | Yes, for hooked `bash` commands | No | User-typed `!` commands bypass the plugin |
 | Hermes Agent | `pre_tool_call` for `terminal`, `write_file`, `patch`, `web_extract` | Denies blocked terminal commands | No, hook mode is intent-only | Yes, for declared write paths and URLs | The hook checks declared tool inputs; wrap Hermes for traffic-time enforcement |
 | Windsurf Cascade | `pre_run_command`, `pre_write_code` | Denies blocked terminal commands | No, Windsurf hooks do not support command rewriting | Yes, for declared write paths | The hook can block declared actions but cannot sandbox allowed commands |
 
 The important distinction is whether the agent lets the hook modify the command
-before execution. Claude Code, Cursor, and OpenCode support that, so Fence can
-turn an allowed shell tool call into `fence -c "..."`. That nested Fence process
-is what applies runtime filesystem and network policy to the command.
+before execution. Claude Code, Cursor, and OpenCode support that by default, so
+Fence can turn an allowed shell tool call into `fence -c "..."`. That nested
+Fence process is what applies runtime filesystem and network policy to the
+command. Codex supports the same rewrite API, but defaults to intent-only
+because Codex usually runs tool commands inside its own sandbox.
 
 Some hook systems only let a pre-hook allow or block an action, usually via an
-exit code or a block response. Hermes and Windsurf are in this category: Fence
-can block denied commands, write paths, or URLs, but it cannot sandbox an
-allowed command unless the agent also supports command rewriting or wrapper
-execution.
+exit code or a block response. Hermes, Windsurf, and default Codex are in this
+category: Fence can block denied commands, write paths, or URLs, but it cannot
+sandbox an allowed command unless rewriting is available and safe to use.
 
 ## How It Works
 
@@ -55,7 +57,8 @@ second nested sandbox and only applies Fence's command policy at hook time.
 Claude Code, Cursor, and OpenCode let Fence replace an allowed shell command
 with `fence -c "..."`. That means the shell command itself runs inside Fence,
 so runtime filesystem and network policy apply to the command after the hook
-allows it.
+allows it. Codex can do the same when you opt in with `--wrap` (see below), but
+defaults to intent-only deny checks.
 
 ### Claude Code
 
@@ -69,6 +72,53 @@ fence hooks uninstall --claude
 ```
 
 Default file: `~/.claude/settings.json`.
+
+### Codex
+
+Codex (ChatGPT Codex app and CLI) uses `PreToolUse` for `Bash` and
+`apply_patch` (matcher also accepts `Edit` / `Write` aliases) and calls
+`fence --codex-pre-tool-use`:
+
+```bash
+fence hooks print --codex
+fence hooks install --codex
+fence hooks install --codex --template code
+fence hooks uninstall --codex
+```
+
+Default file: `~/.codex/hooks.json`. Override with `--file` for a project-local
+`./.codex/hooks.json`.
+
+After install, open `/hooks` in Codex and trust the Fence command. Untrusted
+hooks are skipped. For automation that already vets hook sources outside Codex,
+Codex also supports `--dangerously-bypass-hook-trust`.
+
+**Intent-only by default.** Codex usually runs tool commands inside its own
+sandbox (Seatbelt on macOS, etc.). Nested `fence -c ...` then fails when Fence
+tries to bind its local HTTP proxy (`listen tcp 127.0.0.1:0: bind: operation
+not permitted`). So the default Codex hook only denies commands that violate
+Fence `command` policy and leaves allowed commands unchanged.
+
+**Optional wrap mode** — only when Codex's own sandbox is disabled (for
+example `danger-full-access`):
+
+```bash
+fence hooks install --codex --wrap
+# or, without reinstalling:
+FENCE_CODEX_WRAP=1
+```
+
+With `--wrap` / `FENCE_CODEX_WRAP=1`, allowed commands are rewritten to
+`fence -c "..."` like Claude/Cursor. Do not enable wrap under normal sandboxed
+Codex sessions.
+
+> [!NOTE]
+> **Codex shell interception is incomplete for `unified_exec`.** Codex's
+> `PreToolUse` hook covers simple Bash tool calls and `apply_patch`, but not
+> every shell path (notably richer `unified_exec` streaming). `WebSearch` and
+> other non-shell / non-MCP tools are also not intercepted. The ChatGPT Codex
+> desktop app cannot be whole-agent wrapped with `fence -- codex`; use hooks
+> for command denies, and treat wrap mode as an advanced opt-in only.
 
 ### Cursor
 
@@ -206,12 +256,14 @@ Windsurf hook support maps supported events to Fence policy domains:
 ## Pinning a Specific Policy
 
 By default, hook helpers resolve Fence's config at runtime the same way the CLI
-does. To pin a hook to a specific file or template for `--claude`, `--cursor`,
-`--hermes`, or `--windsurf`:
+does. To pin a hook to a specific file or template for `--claude`, `--codex`,
+`--cursor`, `--hermes`, or `--windsurf`:
 
 ```bash
 fence hooks install --cursor --settings /path/to/fence.json
 fence hooks install --cursor --template code
+fence hooks install --codex --template code
+fence hooks install --codex --wrap
 fence hooks install --hermes --template hermes
 fence hooks install --windsurf --settings /path/to/fence.json
 ```
