@@ -56,6 +56,85 @@ func TestHooksPrintCmd_PrintsClaudeHookConfig(t *testing.T) {
 	}
 }
 
+func TestHooksPrintCmd_PrintsCodexHookConfig(t *testing.T) {
+	cmd := newHooksPrintCmd()
+	var stdout bytes.Buffer
+	cmd.SetOut(&stdout)
+	cmd.SetArgs([]string{"--codex"})
+
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("cmd.Execute() error = %v", err)
+	}
+
+	var output map[string]any
+	if err := json.Unmarshal(stdout.Bytes(), &output); err != nil {
+		t.Fatalf("json.Unmarshal() error = %v", err)
+	}
+
+	hooksValue, ok := output["hooks"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected hooks object, got %#v", output["hooks"])
+	}
+	preToolUse, ok := hooksValue["PreToolUse"].([]any)
+	if !ok || len(preToolUse) != 1 {
+		t.Fatalf("expected one PreToolUse hook group, got %#v", hooksValue["PreToolUse"])
+	}
+
+	group, ok := preToolUse[0].(map[string]any)
+	if !ok {
+		t.Fatalf("expected hook group object, got %#v", preToolUse[0])
+	}
+	if got := group["matcher"]; got != codexPreToolUseMatcher {
+		t.Fatalf("expected matcher %q, got %#v", codexPreToolUseMatcher, got)
+	}
+
+	nestedHooks, ok := group["hooks"].([]any)
+	if !ok || len(nestedHooks) != 1 {
+		t.Fatalf("expected one nested hook, got %#v", group["hooks"])
+	}
+	nested, ok := nestedHooks[0].(map[string]any)
+	if !ok {
+		t.Fatalf("expected nested hook object, got %#v", nestedHooks[0])
+	}
+	if got := nested["type"]; got != "command" {
+		t.Fatalf("expected command hook type, got %#v", got)
+	}
+	if got := nested["command"]; got != codexHookCommand() {
+		t.Fatalf("expected Codex helper command, got %#v", got)
+	}
+	if got := nested["statusMessage"]; got != "Checking with Fence" {
+		t.Fatalf("expected statusMessage, got %#v", got)
+	}
+}
+
+func TestHooksPrintCmd_PrintsCodexHookConfigWithSettings(t *testing.T) {
+	settingsPath := filepath.Join(t.TempDir(), "policy with spaces.json")
+
+	cmd := newHooksPrintCmd()
+	var stdout bytes.Buffer
+	cmd.SetOut(&stdout)
+	cmd.SetArgs([]string{"--codex", "--settings", settingsPath})
+
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("cmd.Execute() error = %v", err)
+	}
+
+	var output map[string]any
+	if err := json.Unmarshal(stdout.Bytes(), &output); err != nil {
+		t.Fatalf("json.Unmarshal() error = %v", err)
+	}
+
+	hooksValue := output["hooks"].(map[string]any)
+	preToolUse := hooksValue["PreToolUse"].([]any)
+	group := preToolUse[0].(map[string]any)
+	nested := group["hooks"].([]any)[0].(map[string]any)
+
+	want := codexHookCommandWithOptions(hookFenceOptions{SettingsPath: settingsPath})
+	if got := nested["command"]; got != want {
+		t.Fatalf("expected pinned Codex helper command %q, got %#v", want, got)
+	}
+}
+
 func TestHooksPrintCmd_PrintsClaudeHookConfigWithSettings(t *testing.T) {
 	settingsPath := filepath.Join(t.TempDir(), "policy with spaces.json")
 
@@ -302,6 +381,163 @@ func TestUninstallClaudeHook_RemovesOnlyFenceHook(t *testing.T) {
 	}
 
 	doc := readHooksTestJSONFile(t, settingsPath)
+	if got := doc["theme"]; got != "dark" {
+		t.Fatalf("expected unrelated top-level settings to be preserved, got %#v", got)
+	}
+
+	hooks := doc["hooks"].(map[string]any)
+	preToolUse := hooks["PreToolUse"].([]any)
+	if len(preToolUse) != 2 {
+		t.Fatalf("expected both PreToolUse groups to remain, got %d", len(preToolUse))
+	}
+
+	firstGroup := preToolUse[0].(map[string]any)
+	nestedHooks := firstGroup["hooks"].([]any)
+	if len(nestedHooks) != 1 {
+		t.Fatalf("expected only custom Bash hook to remain, got %#v", nestedHooks)
+	}
+	nested := nestedHooks[0].(map[string]any)
+	if got := nested["command"]; got != "echo custom" {
+		t.Fatalf("expected custom hook to be preserved, got %#v", got)
+	}
+}
+
+func TestInstallCodexHook_CreatesHooksFile(t *testing.T) {
+	hooksPath := filepath.Join(t.TempDir(), ".codex", "hooks.json")
+
+	changed, err := installCodexHook(hooksPath)
+	if err != nil {
+		t.Fatalf("installCodexHook() error = %v", err)
+	}
+	if !changed {
+		t.Fatal("expected install to create the Codex hook")
+	}
+
+	doc := readHooksTestJSONFile(t, hooksPath)
+	hooks, ok := doc["hooks"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected hooks object, got %#v", doc["hooks"])
+	}
+	preToolUse, ok := hooks["PreToolUse"].([]any)
+	if !ok || len(preToolUse) != 1 {
+		t.Fatalf("expected one PreToolUse group, got %#v", hooks["PreToolUse"])
+	}
+	group := preToolUse[0].(map[string]any)
+	if got := group["matcher"]; got != codexPreToolUseMatcher {
+		t.Fatalf("expected matcher %q, got %#v", codexPreToolUseMatcher, got)
+	}
+}
+
+func TestInstallCodexHook_IsIdempotent(t *testing.T) {
+	hooksPath := filepath.Join(t.TempDir(), ".codex", "hooks.json")
+
+	changed, err := installCodexHook(hooksPath)
+	if err != nil {
+		t.Fatalf("first installCodexHook() error = %v", err)
+	}
+	if !changed {
+		t.Fatal("expected first install to change the file")
+	}
+
+	changed, err = installCodexHook(hooksPath)
+	if err != nil {
+		t.Fatalf("second installCodexHook() error = %v", err)
+	}
+	if changed {
+		t.Fatal("expected second install to be a no-op")
+	}
+
+	doc := readHooksTestJSONFile(t, hooksPath)
+	hooks := doc["hooks"].(map[string]any)
+	preToolUse := hooks["PreToolUse"].([]any)
+	if len(preToolUse) != 1 {
+		t.Fatalf("expected one PreToolUse group after repeated install, got %d", len(preToolUse))
+	}
+}
+
+func TestInstallCodexHookWithOptions_ReplacesExistingFenceHook(t *testing.T) {
+	hooksPath := filepath.Join(t.TempDir(), ".codex", "hooks.json")
+
+	changed, err := installCodexHook(hooksPath)
+	if err != nil {
+		t.Fatalf("first installCodexHook() error = %v", err)
+	}
+	if !changed {
+		t.Fatal("expected first install to change the file")
+	}
+
+	hookOptions := hookFenceOptions{SettingsPath: filepath.Join(t.TempDir(), "policy.json")}
+	changed, err = installCodexHookWithOptions(hooksPath, hookOptions)
+	if err != nil {
+		t.Fatalf("installCodexHookWithOptions() error = %v", err)
+	}
+	if !changed {
+		t.Fatal("expected install with hook options to replace the existing Fence hook")
+	}
+
+	doc := readHooksTestJSONFile(t, hooksPath)
+	hooks := doc["hooks"].(map[string]any)
+	preToolUse := hooks["PreToolUse"].([]any)
+	if len(preToolUse) != 1 {
+		t.Fatalf("expected one PreToolUse group after replacement, got %d", len(preToolUse))
+	}
+
+	group := preToolUse[0].(map[string]any)
+	nested := group["hooks"].([]any)[0].(map[string]any)
+	want := codexHookCommandWithOptions(hookOptions)
+	if got := nested["command"]; got != want {
+		t.Fatalf("expected updated hook command %q, got %#v", want, got)
+	}
+}
+
+func TestUninstallCodexHook_RemovesOnlyFenceHook(t *testing.T) {
+	hooksPath := filepath.Join(t.TempDir(), ".codex", "hooks.json")
+	content := `{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash|apply_patch|Edit|Write",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "` + codexHookCommandWithOptions(hookFenceOptions{SettingsPath: "/tmp/fence policy.json"}) + `"
+          },
+          {
+            "type": "command",
+            "command": "echo custom"
+          }
+        ]
+      },
+      {
+        "matcher": "mcp__.*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "echo keep"
+          }
+        ]
+      }
+    ]
+  },
+  "theme": "dark"
+}`
+
+	if err := os.MkdirAll(filepath.Dir(hooksPath), 0o750); err != nil {
+		t.Fatalf("os.MkdirAll() error = %v", err)
+	}
+	if err := os.WriteFile(hooksPath, []byte(content), 0o600); err != nil {
+		t.Fatalf("os.WriteFile() error = %v", err)
+	}
+
+	changed, err := uninstallCodexHook(hooksPath)
+	if err != nil {
+		t.Fatalf("uninstallCodexHook() error = %v", err)
+	}
+	if !changed {
+		t.Fatal("expected uninstall to remove the Codex hook")
+	}
+
+	doc := readHooksTestJSONFile(t, hooksPath)
 	if got := doc["theme"]; got != "dark" {
 		t.Fatalf("expected unrelated top-level settings to be preserved, got %#v", got)
 	}

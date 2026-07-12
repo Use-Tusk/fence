@@ -21,6 +21,17 @@ func writeClaudeHooksConfigWithOptions(w io.Writer, hookOptions hookFenceOptions
 	return err
 }
 
+func writeCodexHooksConfigWithOptions(w io.Writer, hookOptions hookFenceOptions) error {
+	config := buildCodexHooksConfigWithOptions(hookOptions)
+	data, err := json.MarshalIndent(config, "", "  ")
+	if err != nil {
+		return fmt.Errorf("failed to marshal Codex hook config: %w", err)
+	}
+
+	_, err = fmt.Fprintln(w, string(data))
+	return err
+}
+
 func writeCursorHooksConfigWithOptions(w io.Writer, hookOptions hookFenceOptions) error {
 	config := buildCursorHooksConfigWithOptions(hookOptions)
 	data, err := json.MarshalIndent(config, "", "  ")
@@ -64,6 +75,14 @@ func defaultCursorHooksPath() string {
 		return ""
 	}
 	return filepath.Join(home, ".cursor", "hooks.json")
+}
+
+func defaultCodexHooksPath() string {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return ""
+	}
+	return filepath.Join(home, ".codex", "hooks.json")
 }
 
 func defaultWindsurfHooksPath() string {
@@ -114,6 +133,16 @@ func buildClaudeHooksConfigWithOptions(hookOptions hookFenceOptions) map[string]
 	}
 }
 
+func buildCodexHooksConfigWithOptions(hookOptions hookFenceOptions) map[string]any {
+	return map[string]any{
+		"hooks": map[string]any{
+			"PreToolUse": []any{
+				buildCodexPreToolUseHookGroupWithOptions(hookOptions),
+			},
+		},
+	}
+}
+
 func buildCursorHooksConfigWithOptions(hookOptions hookFenceOptions) map[string]any {
 	return map[string]any{
 		"version": 1,
@@ -145,6 +174,23 @@ func buildClaudePreToolUseHookGroupWithOptions(hookOptions hookFenceOptions) map
 	}
 }
 
+// codexPreToolUseMatcher covers Bash plus apply_patch (and its Edit/Write
+// matcher aliases). Codex still reports tool_name "apply_patch" on the wire.
+const codexPreToolUseMatcher = "Bash|apply_patch|Edit|Write"
+
+func buildCodexPreToolUseHookGroupWithOptions(hookOptions hookFenceOptions) map[string]any {
+	return map[string]any{
+		"matcher": codexPreToolUseMatcher,
+		"hooks": []any{
+			map[string]any{
+				"type":          "command",
+				"command":       codexHookCommandWithOptions(hookOptions),
+				"statusMessage": "Checking with Fence",
+			},
+		},
+	}
+}
+
 func buildCursorPreToolUseHookGroupWithOptions(hookOptions hookFenceOptions) map[string]any {
 	return map[string]any{
 		"matcher": "Shell",
@@ -165,6 +211,19 @@ func claudeHookCommand() string {
 
 func claudeHookCommandWithOptions(hookOptions hookFenceOptions) string {
 	args := []string{"fence", claudePreToolUseMode}
+	args = append(args, hookOptions.fenceArgs()...)
+	return sandbox.ShellQuote(args)
+}
+
+func codexHookCommand() string {
+	return codexHookCommandWithOptions(hookFenceOptions{})
+}
+
+func codexHookCommandWithOptions(hookOptions hookFenceOptions) string {
+	args := []string{"fence", codexPreToolUseMode}
+	if hookOptions.AllowWrap {
+		args = append(args, "--wrap")
+	}
 	args = append(args, hookOptions.fenceArgs()...)
 	return sandbox.ShellQuote(args)
 }
@@ -237,6 +296,50 @@ func installClaudeHookWithOptions(path string, hookOptions hookFenceOptions) (bo
 	doc["hooks"] = hooks
 
 	if err := writeHookConfigDocument(path, doc, "Claude settings"); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+func installCodexHook(path string) (bool, error) {
+	return installCodexHookWithOptions(path, hookFenceOptions{})
+}
+
+func installCodexHookWithOptions(path string, hookOptions hookFenceOptions) (bool, error) {
+	doc, err := loadHookConfigDocument(path, "Codex hooks config")
+	if err != nil {
+		return false, err
+	}
+
+	hooks, err := ensureJSONObjectField(doc, "hooks", "Codex hooks config")
+	if err != nil {
+		return false, err
+	}
+
+	preToolUse, err := getJSONArrayField(hooks, "PreToolUse", "Codex hooks config")
+	if err != nil {
+		return false, err
+	}
+
+	desiredCommand := codexHookCommandWithOptions(hookOptions)
+	summary := summarizeHookCommands(preToolUse, desiredCommand, isCodexHookCommand)
+	if summary.Total == 1 && summary.Exact == 1 {
+		return false, nil
+	}
+
+	filtered := preToolUse
+	if summary.Total > 0 {
+		var removed bool
+		filtered, removed = removeHookCommands(preToolUse, isCodexHookCommand)
+		if !removed {
+			filtered = preToolUse
+		}
+	}
+
+	hooks["PreToolUse"] = append(filtered, buildCodexPreToolUseHookGroupWithOptions(hookOptions))
+	doc["hooks"] = hooks
+
+	if err := writeHookConfigDocument(path, doc, "Codex hooks config"); err != nil {
 		return false, err
 	}
 	return true, nil
@@ -385,6 +488,56 @@ func uninstallClaudeHook(path string) (bool, error) {
 	return true, nil
 }
 
+func uninstallCodexHook(path string) (bool, error) {
+	doc, err := loadHookConfigDocument(path, "Codex hooks config")
+	if err != nil {
+		if os.IsNotExist(err) {
+			return false, nil
+		}
+		return false, err
+	}
+
+	hooksValue, ok := doc["hooks"]
+	if !ok {
+		return false, nil
+	}
+	hooks, ok := hooksValue.(map[string]any)
+	if !ok {
+		return false, fmt.Errorf("invalid Codex hooks config: hooks must be an object")
+	}
+
+	preToolUseValue, ok := hooks["PreToolUse"]
+	if !ok {
+		return false, nil
+	}
+	preToolUse, ok := preToolUseValue.([]any)
+	if !ok {
+		return false, fmt.Errorf("invalid Codex hooks config: hooks.PreToolUse must be an array")
+	}
+
+	filtered, removed := removeHookCommands(preToolUse, isCodexHookCommand)
+	if !removed {
+		return false, nil
+	}
+
+	if len(filtered) == 0 {
+		delete(hooks, "PreToolUse")
+	} else {
+		hooks["PreToolUse"] = filtered
+	}
+
+	if len(hooks) == 0 {
+		delete(doc, "hooks")
+	} else {
+		doc["hooks"] = hooks
+	}
+
+	if err := writeHookConfigDocument(path, doc, "Codex hooks config"); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
 func uninstallCursorHook(path string) (bool, error) {
 	doc, err := loadHookConfigDocument(path, "Cursor hooks config")
 	if err != nil {
@@ -492,6 +645,10 @@ func uninstallWindsurfHook(path string) (bool, error) {
 
 func isClaudeHookCommand(command string) bool {
 	return containsHelperMode(command, claudePreToolUseMode)
+}
+
+func isCodexHookCommand(command string) bool {
+	return containsHelperMode(command, codexPreToolUseMode)
 }
 
 func isCursorHookCommand(command string) bool {

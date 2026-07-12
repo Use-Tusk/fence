@@ -16,6 +16,9 @@ const fenceSandboxEnvVar = "FENCE_SANDBOX"
 type hookFenceOptions struct {
 	SettingsPath string
 	TemplateName string
+	// AllowWrap opts into rewriting allowed shell commands to fence -c.
+	// Currently only meaningful for Codex hooks (intent-only by default).
+	AllowWrap bool
 }
 
 type shellHookRequest struct {
@@ -181,6 +184,8 @@ func parseHookFenceOptionsArgs(args []string) (hookFenceOptions, error) {
 			i++
 		case strings.HasPrefix(arg, "--template="):
 			hookOptions.TemplateName = strings.TrimPrefix(arg, "--template=")
+		case arg == "--wrap":
+			hookOptions.AllowWrap = true
 		default:
 			return hookFenceOptions{}, fmt.Errorf("unknown hook helper flag: %s", arg)
 		}

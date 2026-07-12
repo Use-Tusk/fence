@@ -75,8 +75,9 @@ Note: On Linux, if OpenCode or Gemini CLI is installed via Linuxbrew, Landlock c
 Hook-based wrapping uses the agent/editor's own hook system to inspect tool
 calls before they run. For Claude Code, Cursor, and OpenCode, Fence can rewrite
 allowed shell commands to `fence -c ...`, so the command runs inside the
-sandbox. Hermes and Windsurf have broader but intent-only hook surfaces for
-checking declared tool inputs before they run.
+sandbox. Codex defaults to intent-only command denies (optional `--wrap` for
+rewrite when Codex's sandbox is disabled). Hermes and Windsurf have broader but
+intent-only hook surfaces for checking declared tool inputs before they run.
 
 See [Agent Hooks](hooks.md) for install commands, pinning options, limitations,
 and a capability matrix that shows which integrations provide runtime
