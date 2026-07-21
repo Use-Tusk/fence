@@ -63,7 +63,9 @@ func buildCodexPreToolUseResponse(stdin io.Reader, fenceExePath string, extraFen
 	if event.HookEventName != "" && event.HookEventName != "PreToolUse" {
 		return nil, false, nil
 	}
-	if !isCodexShellToolName(event.ToolName) {
+	// Bash only. apply_patch / Edit / Write put patch text in tool_input.command,
+	// which is not a shell command Fence can enforce.
+	if event.ToolName != "Bash" {
 		return nil, false, nil
 	}
 
@@ -151,19 +153,6 @@ func codexAllowWrap(hookOptions hookFenceOptions) bool {
 		return true
 	}
 	return os.Getenv(codexWrapEnvVar) == "1"
-}
-
-// isCodexShellToolName reports whether toolName is a Codex tool whose
-// PreToolUse payload carries tool_input.command and supports updatedInput
-// rewriting. Edit/Write are matcher aliases for apply_patch; the wire
-// tool_name is still "apply_patch", but accept the aliases defensively.
-func isCodexShellToolName(toolName string) bool {
-	switch toolName {
-	case "Bash", "apply_patch", "Edit", "Write":
-		return true
-	default:
-		return false
-	}
 }
 
 func codexDenyReason(command string, extraFenceArgs []string) string {

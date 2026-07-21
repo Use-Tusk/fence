@@ -56,7 +56,7 @@ You can use it like `fence -t code -- claude`.
 | Agent | Works with template | Notes |
 |-------|--------| ----- |
 | Claude Code | `code` | - |
-| Codex CLI | `code` | - |
+| Codex | `code` | Wrap: CLI only (`fence -- codex`). Hooks: app + CLI (see below). |
 | Gemini CLI | `code` | - |
 | OpenCode | `code` | - |
 | Amp | `code` | - |
