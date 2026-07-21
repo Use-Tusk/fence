@@ -496,7 +496,7 @@ func TestUninstallCodexHook_RemovesOnlyFenceHook(t *testing.T) {
   "hooks": {
     "PreToolUse": [
       {
-        "matcher": "Bash|apply_patch|Edit|Write",
+        "matcher": "Bash",
         "hooks": [
           {
             "type": "command",

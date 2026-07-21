@@ -109,41 +109,21 @@ func TestBuildCodexPreToolUseResponse_WrapsWithEnvOptIn(t *testing.T) {
 	}
 }
 
-func TestBuildCodexPreToolUseResponse_WrapsApplyPatchCommandWithWrapFlag(t *testing.T) {
-	t.Setenv(fenceSandboxEnvVar, "")
-	t.Setenv(codexWrapEnvVar, "")
-
+func TestBuildCodexPreToolUseResponse_IgnoresApplyPatch(t *testing.T) {
 	input := `{
 		"hook_event_name": "PreToolUse",
 		"tool_name": "apply_patch",
 		"tool_input": {
-			"command": "apply_patch <<'EOF'\n*** Begin Patch\n*** End Patch\nEOF"
+			"command": "*** Begin Patch\n*** End Patch"
 		}
 	}`
 
-	response, changed, err := buildCodexPreToolUseResponse(
-		strings.NewReader(input),
-		"/usr/local/bin/fence",
-		[]string{"--wrap"},
-	)
+	_, changed, err := buildCodexPreToolUseResponse(strings.NewReader(input), "/usr/local/bin/fence", []string{"--wrap"})
 	if err != nil {
 		t.Fatalf("buildCodexPreToolUseResponse() error = %v", err)
 	}
-	if !changed {
-		t.Fatal("expected apply_patch command to be rewritten")
-	}
-
-	var decoded codexPreToolUseResponse
-	if err := json.Unmarshal(response, &decoded); err != nil {
-		t.Fatalf("json.Unmarshal() error = %v", err)
-	}
-	if decoded.HookSpecificOutput == nil || decoded.HookSpecificOutput.PermissionDecision != "allow" {
-		t.Fatalf("expected allow decision, got %#v", decoded.HookSpecificOutput)
-	}
-	wantPrefix := sandbox.ShellQuote([]string{"/usr/local/bin/fence", "-c"})
-	got, _ := decoded.HookSpecificOutput.UpdatedInput["command"].(string)
-	if !strings.HasPrefix(got, wantPrefix) {
-		t.Fatalf("expected wrapped apply_patch command starting with %q, got %q", wantPrefix, got)
+	if changed {
+		t.Fatal("expected apply_patch to be ignored")
 	}
 }
 

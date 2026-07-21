@@ -174,9 +174,7 @@ func buildClaudePreToolUseHookGroupWithOptions(hookOptions hookFenceOptions) map
 	}
 }
 
-// codexPreToolUseMatcher covers Bash plus apply_patch (and its Edit/Write
-// matcher aliases). Codex still reports tool_name "apply_patch" on the wire.
-const codexPreToolUseMatcher = "Bash|apply_patch|Edit|Write"
+const codexPreToolUseMatcher = "Bash"
 
 func buildCodexPreToolUseHookGroupWithOptions(hookOptions hookFenceOptions) map[string]any {
 	return map[string]any{
