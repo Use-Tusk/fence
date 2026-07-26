@@ -104,9 +104,12 @@ Smoke tests verify the compiled `fence` binary works end-to-end. Unlike integrat
 - CLI flags (--version, -c, -s)
 - Filesystem restrictions via settings file
 - Command blocking via settings file
-- Network blocking
+- Network blocking (default-deny)
+- Network allowlisting via a local HTTP origin (no public internet)
 - Environment variable injection (FENCE_SANDBOX, HTTP_PROXY)
 - Tool compatibility (python3, node, git, rg) - ensure that frequently used tools don't break in sandbox
+
+The allowlist check starts [`scripts/local-server.py`](/scripts/local-server.py) on loopback, allowlists `127.0.0.1`, and clears `NO_PROXY` in the curl command so the request goes through fence's HTTP proxy (fence injects `NO_PROXY` for loopback by default).
 
 **Run:**
 
@@ -116,9 +119,6 @@ Smoke tests verify the compiled `fence` binary works end-to-end. Unlike integrat
 
 # Test specific binary
 ./scripts/smoke_test.sh ./path/to/fence
-
-# Enable network tests (requires internet)
-FENCE_TEST_NETWORK=1 ./scripts/smoke_test.sh
 ```
 
 ## Platform-Specific Behavior

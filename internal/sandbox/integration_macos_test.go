@@ -3,6 +3,7 @@
 package sandbox
 
 import (
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -247,24 +248,26 @@ func TestMacOS_NetworkBlocksNc(t *testing.T) {
 	assertBlocked(t, result)
 }
 
-// TestMacOS_ProxyAllowsAllowedDomains verifies the proxy allows configured domains.
+// TestMacOS_ProxyAllowsAllowedDomains verifies the proxy allows configured hosts.
+// Uses a local HTTP origin (no public internet). Fence injects NO_PROXY for
+// loopback, so the curl command clears it to force the HTTP proxy allowlist path.
 func TestMacOS_ProxyAllowsAllowedDomains(t *testing.T) {
 	skipIfAlreadySandboxed(t)
 	skipIfCommandNotFound(t, "curl")
 
+	const marker = "fence-allowed-domain-ok"
+	url, cleanup := startLocalHTTPOrigin(t, marker)
+	defer cleanup()
+
 	workspace := createTempWorkspace(t)
-	cfg := testConfigWithNetwork("httpbin.org")
+	cfg := testConfigWithNetwork("127.0.0.1")
 	cfg.Filesystem.AllowWrite = []string{workspace}
 
-	// This test requires actual network - skip in CI if network is unavailable
-	if os.Getenv("FENCE_TEST_NETWORK") != "1" {
-		t.Skip("skipping: set FENCE_TEST_NETWORK=1 to run network tests")
-	}
-
-	result := runUnderSandboxWithTimeout(t, cfg, "curl -s --connect-timeout 5 --max-time 10 https://httpbin.org/get", workspace, 15*time.Second)
+	cmd := fmt.Sprintf("NO_PROXY= no_proxy= curl -s --connect-timeout 5 --max-time 10 %s", url)
+	result := runUnderSandboxWithTimeout(t, cfg, cmd, workspace, 15*time.Second)
 
 	assertAllowed(t, result)
-	assertContains(t, result.Stdout, "httpbin")
+	assertContains(t, result.Stdout, marker)
 }
 
 // ============================================================================

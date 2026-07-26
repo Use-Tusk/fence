@@ -44,7 +44,18 @@ echo "=============================================="
 
 # Create temp workspace in current directory (not /tmp, which gets overlaid by bwrap --tmpfs)
 WORKSPACE=$(mktemp -d -p .)
-trap "rm -rf $WORKSPACE" EXIT
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+LOCAL_SERVER_PID=""
+
+cleanup() {
+    if [[ -n "$LOCAL_SERVER_PID" ]]; then
+        kill "$LOCAL_SERVER_PID" 2>/dev/null || true
+        wait "$LOCAL_SERVER_PID" 2>/dev/null || true
+        LOCAL_SERVER_PID=""
+    fi
+    rm -rf "$WORKSPACE"
+}
+trap cleanup EXIT
 
 run_test() {
     local name="$1"
@@ -218,25 +229,57 @@ else
     skip_test "network blocked (curl)" "curl not installed"
 fi
 
-# Test with allowed domain (only if FENCE_TEST_NETWORK is set)
-if [[ "${FENCE_TEST_NETWORK:-}" == "1" ]]; then
+# Allowed-host path: local origin + allowlist (no public internet).
+# Fence injects NO_PROXY for loopback, so clear it so curl uses the HTTP proxy.
+if command_exists curl && command_exists python3 && [[ -f "$SCRIPT_DIR/local-server.py" ]]; then
+    SMOKE_PORT=$(python3 -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1", 0)); print(s.getsockname()[1]); s.close()')
+    python3 "$SCRIPT_DIR/local-server.py" "$SMOKE_PORT" >/dev/null 2>&1 &
+    LOCAL_SERVER_PID=$!
+
+    # Wait briefly for the server to accept connections
+    for _ in 1 2 3 4 5 6 7 8 9 10; do
+        if curl -s --connect-timeout 1 --max-time 1 "http://127.0.0.1:${SMOKE_PORT}/" >/dev/null 2>&1; then
+            break
+        fi
+        sleep 0.1
+    done
+
     cat > "$SETTINGS_FILE" << EOF
 {
   "network": {
-    "allowedDomains": ["httpbin.org"]
+    "allowedDomains": ["127.0.0.1"]
   },
   "filesystem": {
     "allowWrite": ["$WORKSPACE"]
   }
 }
 EOF
-    if command_exists curl; then
-        run_test "allowed domain works" "pass" "$FENCE_BIN" -s "$SETTINGS_FILE" -c "curl -s --connect-timeout 5 --max-time 10 https://httpbin.org/get"
+
+    set +e
+    output=$("$FENCE_BIN" -s "$SETTINGS_FILE" -c "NO_PROXY= no_proxy= curl -s --connect-timeout 5 --max-time 10 http://127.0.0.1:${SMOKE_PORT}/" 2>&1)
+    exit_code=$?
+    set -e
+
+    if [[ $exit_code -eq 0 ]] && echo "$output" | grep -q '"status": "ok"'; then
+        echo -e "Testing: allowed domain works... ${GREEN}PASS${NC}"
+        PASSED=$((PASSED + 1))
     else
-        skip_test "allowed domain works" "curl not installed"
+        echo -e "Testing: allowed domain works... ${RED}FAIL${NC} (exit $exit_code)"
+        echo "  Output: ${output:0:200}"
+        FAILED=$((FAILED + 1))
     fi
+
+    if [[ -n "$LOCAL_SERVER_PID" ]]; then
+        kill "$LOCAL_SERVER_PID" 2>/dev/null || true
+        wait "$LOCAL_SERVER_PID" 2>/dev/null || true
+        LOCAL_SERVER_PID=""
+    fi
+elif ! command_exists curl; then
+    skip_test "allowed domain works" "curl not installed"
+elif ! command_exists python3; then
+    skip_test "allowed domain works" "python3 not installed"
 else
-    skip_test "allowed domain works" "FENCE_TEST_NETWORK not set"
+    skip_test "allowed domain works" "local-server.py not found"
 fi
 
 echo ""
