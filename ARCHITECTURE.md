@@ -167,8 +167,7 @@ type Config struct {
 - `denyWrite` turns specific paths back into read-only.
 - Fence also applies mandatory dangerous-path protection independent of user
   config. This protects high-risk targets such as shell startup files, nested
-  `.git/hooks`, some editor config directories, and some agent config
-  directories.
+  `.git/hooks` and some editor config directories.
 - `allowGitConfig` is a narrow escape hatch for `.git/config`.
 
 #### Command And SSH Policy

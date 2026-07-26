@@ -244,8 +244,8 @@ func matchesDangerousPath(path string) (string, bool) {
 }
 
 // pathInDangerousDir matches single-component (".vscode") and multi-component
-// (".claude/commands") entries at any path-component boundary, so
-// "notvscode" won't match ".vscode".
+// ("a/b") entries at any path-component boundary, so "notvscode" won't
+// match ".vscode".
 func pathInDangerousDir(path, dir string) bool {
 	dirParts := strings.Split(filepath.ToSlash(dir), "/")
 	pathParts := strings.Split(filepath.ToSlash(path), "/")

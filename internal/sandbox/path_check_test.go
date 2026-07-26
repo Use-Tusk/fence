@@ -84,11 +84,23 @@ func TestCheckWritePath_DangerousPathsAlwaysDenied(t *testing.T) {
 		"/home/user/proj/.git/hooks/pre-commit",
 		"/home/user/proj/.git/config",
 		"/home/user/proj/.vscode/settings.json",
-		"/home/user/proj/.claude/commands/x.md",
+		"/home/user/proj/.idea/workspace.xml",
 	} {
 		err := CheckWritePath(path, "", cfg)
 		if err == nil {
 			t.Errorf("expected dangerous path %q to be denied even with allowWrite=/", path)
+		}
+	}
+
+	// Claude project config is intentionally not mandatory-denied; allowWrite
+	// covers it like any other workspace path.
+	for _, path := range []string{
+		"/home/user/proj/.claude/commands/x.md",
+		"/home/user/proj/.claude/agents/x.md",
+		"/home/user/proj/.claude/skills/foo/SKILL.md",
+	} {
+		if err := CheckWritePath(path, "", cfg); err != nil {
+			t.Errorf("expected Claude path %q to be writable with allowWrite=/, got %v", path, err)
 		}
 	}
 }

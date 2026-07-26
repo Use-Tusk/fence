@@ -27,8 +27,6 @@ var DangerousFiles = []string{
 var DangerousDirectories = []string{
 	".vscode",
 	".idea",
-	".claude/commands",
-	".claude/agents",
 }
 
 // GetDefaultWritePaths returns system paths that should be writable for commands to work.
@@ -190,8 +188,8 @@ func FindDangerousFiles(root string, maxDepth int) []string {
 	for _, d := range DangerousDirectories {
 		dangerousDirSet[d] = true
 	}
-	// For multi-component dangerous dirs like ".claude/commands", track the
-	// first component so we enter it during the walk, then match the full path.
+	// For multi-component dangerous dirs (e.g. "a/b"), track the first
+	// component so we enter it during the walk, then match the full path.
 	multiCompFirstComponent := make(map[string]bool)
 	for _, d := range DangerousDirectories {
 		if strings.Contains(d, string(filepath.Separator)) {
@@ -273,9 +271,9 @@ func FindDangerousFiles(root string, maxDepth int) []string {
 			return filepath.SkipDir
 		}
 
-		// Check multi-component dangerous dirs like ".claude/commands":
-		// match when the relative path ends with the full pattern on a
-		// path-component boundary (so "not.claude/commands" won't match).
+		// Check multi-component dangerous dirs: match when the relative
+		// path ends with the full pattern on a path-component boundary
+		// (so "nota/b" won't match "a/b").
 		if d.IsDir() {
 			for _, dd := range DangerousDirectories {
 				if strings.Contains(dd, string(filepath.Separator)) &&
