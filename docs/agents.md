@@ -89,6 +89,6 @@ Fence includes additional "dangerous file protection" (writes blocked regardless
 
 - `.git/hooks/*`
 - shell startup files (`.zshrc`, `.bashrc`, etc.)
-- some editor/tool config directories
+- IDE project config directories (`.vscode`, `.idea`)
 
 See [`ARCHITECTURE.md`](/ARCHITECTURE.md) for the full list and rationale.
