@@ -4,11 +4,14 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"net"
+	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -155,6 +158,27 @@ func testConfigWithNetwork(domains ...string) *config.Config {
 	cfg := testConfig()
 	cfg.Network.AllowedDomains = domains
 	return cfg
+}
+
+// startLocalHTTPOrigin starts an HTTP server on 127.0.0.1 with an ephemeral
+// port that responds with marker on every path. Used by allowlist tests so
+// they do not depend on the public internet.
+func startLocalHTTPOrigin(t *testing.T, marker string) (url string, cleanup func()) {
+	t.Helper()
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/", func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(marker))
+	})
+	server := &http.Server{Handler: mux, ReadHeaderTimeout: 2 * time.Second}
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("failed to allocate local HTTP origin port: %v", err)
+	}
+	port := listener.Addr().(*net.TCPAddr).Port
+	go func() { _ = server.Serve(listener) }()
+
+	return "http://127.0.0.1:" + strconv.Itoa(port) + "/", func() { _ = server.Close() }
 }
 
 // ============================================================================
