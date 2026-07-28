@@ -89,6 +89,7 @@ func BenchmarkManagerInitialize(b *testing.B) {
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		manager := NewManager(cfg, false, false)
+		configureIntegrationManager(b, manager)
 		if err := manager.Initialize(); err != nil {
 			b.Fatalf("failed to initialize: %v", err)
 		}
@@ -104,6 +105,8 @@ func BenchmarkWrapCommand(b *testing.B) {
 	cfg := benchConfig(workspace)
 
 	manager := NewManager(cfg, false, false)
+
+	configureIntegrationManager(b, manager)
 	if err := manager.Initialize(); err != nil {
 		b.Fatalf("failed to initialize: %v", err)
 	}
@@ -132,6 +135,7 @@ func BenchmarkColdSandbox_True(b *testing.B) {
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		manager := NewManager(cfg, false, false)
+		configureIntegrationManager(b, manager)
 		if err := manager.Initialize(); err != nil {
 			b.Fatalf("init failed: %v", err)
 		}
@@ -159,6 +163,8 @@ func BenchmarkWarmSandbox_True(b *testing.B) {
 	cfg := benchConfig(workspace)
 
 	manager := NewManager(cfg, false, false)
+
+	configureIntegrationManager(b, manager)
 	if err := manager.Initialize(); err != nil {
 		b.Fatalf("init failed: %v", err)
 	}
@@ -183,6 +189,8 @@ func BenchmarkWarmSandbox_Echo(b *testing.B) {
 	cfg := benchConfig(workspace)
 
 	manager := NewManager(cfg, false, false)
+
+	configureIntegrationManager(b, manager)
 	if err := manager.Initialize(); err != nil {
 		b.Fatalf("init failed: %v", err)
 	}
@@ -210,6 +218,8 @@ func BenchmarkWarmSandbox_Python(b *testing.B) {
 	cfg := benchConfig(workspace)
 
 	manager := NewManager(cfg, false, false)
+
+	configureIntegrationManager(b, manager)
 	if err := manager.Initialize(); err != nil {
 		b.Fatalf("init failed: %v", err)
 	}
@@ -234,6 +244,8 @@ func BenchmarkWarmSandbox_FileWrite(b *testing.B) {
 	cfg := benchConfig(workspace)
 
 	manager := NewManager(cfg, false, false)
+
+	configureIntegrationManager(b, manager)
 	if err := manager.Initialize(); err != nil {
 		b.Fatalf("init failed: %v", err)
 	}
@@ -267,6 +279,8 @@ func BenchmarkWarmSandbox_GitStatus(b *testing.B) {
 	cfg := benchConfig(repoDir)
 
 	manager := NewManager(cfg, false, false)
+
+	configureIntegrationManager(b, manager)
 	if err := manager.Initialize(); err != nil {
 		b.Fatalf("init failed: %v", err)
 	}
@@ -323,6 +337,8 @@ func benchmarkAmortized(b *testing.B, innerCmd string, n int) {
 	cfg := benchConfig(workspace)
 
 	manager := NewManager(cfg, false, false)
+
+	configureIntegrationManager(b, manager)
 	if err := manager.Initialize(); err != nil {
 		b.Fatalf("init failed: %v", err)
 	}
@@ -569,6 +585,7 @@ func BenchmarkWrapCommandConfigs(b *testing.B) {
 			},
 		}
 		manager := NewManager(cfg, false, false)
+		configureIntegrationManager(b, manager)
 		if err := manager.Initialize(); err != nil {
 			b.Fatalf("init failed: %v", err)
 		}
@@ -604,6 +621,7 @@ func BenchmarkWrapCommandConfigs(b *testing.B) {
 			Command: config.CommandConfig{UseDefaults: boolPtr(false)},
 		}
 		manager := NewManager(cfg, false, false)
+		configureIntegrationManager(b, manager)
 		if err := manager.Initialize(); err != nil {
 			b.Fatalf("init failed: %v", err)
 		}
@@ -631,6 +649,7 @@ func BenchmarkWrapCommandConfigs(b *testing.B) {
 			Command: config.CommandConfig{UseDefaults: boolPtr(false)},
 		}
 		manager := NewManager(cfg, false, false)
+		configureIntegrationManager(b, manager)
 		if err := manager.Initialize(); err != nil {
 			b.Fatalf("init failed: %v", err)
 		}
@@ -662,6 +681,7 @@ func BenchmarkWrapCommandConfigs(b *testing.B) {
 			Command: config.CommandConfig{UseDefaults: boolPtr(false)},
 		}
 		manager := NewManager(cfg, false, false)
+		configureIntegrationManager(b, manager)
 		if err := manager.Initialize(); err != nil {
 			b.Fatalf("init failed: %v", err)
 		}
@@ -702,6 +722,7 @@ func BenchmarkManagerInit(b *testing.B) {
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		m := NewManager(cfg, false, false)
+		configureIntegrationManager(b, m)
 		if err := m.Initialize(); err != nil {
 			b.Fatalf("init failed: %v", err)
 		}
@@ -723,6 +744,7 @@ func BenchmarkManagerCleanup(b *testing.B) {
 	for i := 0; i < b.N; i++ {
 		b.StopTimer()
 		m := NewManager(cfg, false, false)
+		configureIntegrationManager(b, m)
 		if err := m.Initialize(); err != nil {
 			b.Fatalf("init failed: %v", err)
 		}

@@ -44,7 +44,8 @@ The mount sequence is easiest to understand as a set of phases.
 | 11 | `denyWrite` read-only overlays | Re-tighten specific writable paths |
 | 12 | Runtime executable deny | Block selected executables at `execve` time |
 | 13 | Bridge and reverse-bridge socket binds | Make proxy and inbound bridge sockets reachable |
-| 14 | Final `-- <shell> <flag> <script>` | Hand off to the bootstrap script inside the sandbox |
+| 14 | Bootstrap executable staging and plan | Mount canonical helper/shell aliases after `/tmp` and policy overlays |
+| 15 | Final `-- /tmp/fence/bin/fence --linux-bootstrap-init` | Hand off to the Go initializer inside the sandbox |
 
 ## Phase-by-Phase Details
 
@@ -375,21 +376,38 @@ through them.
 If inbound reverse bridges are active, Fence binds the temporary directory that
 contains the reverse bridge socket files.
 
-### 14. Final Command Handoff
+### 14. Bootstrap Executable Staging And Plan
+
+Fence stages canonicalized executables at fixed paths after `/tmp` and the late
+policy overlays have been emitted:
+
+- `/tmp/fence/bin/fence`
+- `/tmp/fence/bin/shell`
+
+The helper receives a bounded, versioned bootstrap plan containing exact bridge
+endpoints, environment repair instructions, and the final exec chain. Workload
+runtime-deny mounts cannot hide these trusted aliases because the staging mounts
+are applied afterward.
+
+### 15. Final Command Handoff
 
 After the mount list is complete, Fence appends:
 
 ```text
--- <shellPath> <shellFlag> <innerScript>
+-- /tmp/fence/bin/fence --linux-bootstrap-init
 ```
 
-The inner bootstrap script is responsible for:
+The Go initializer:
 
-- starting the in-sandbox `socat` listeners that connect to the bound Unix sockets
-- exporting `HTTP_PROXY`, `HTTPS_PROXY`, `ALL_PROXY`, and `NO_PROXY`
-- starting reverse listeners for exposed ports
-- optionally re-execing through `fence --landlock-apply`
-- finally running the user command
+- validates the bootstrap plan;
+- repairs `TMPDIR` and `XDG_RUNTIME_DIR`;
+- starts one Fence bridge helper and waits for all listeners;
+- exports proxy and sandbox environment variables;
+- `exec`s the optional argv and Landlock shims followed by the staged shell and
+  user command.
+
+The initializer does not remain as a workload supervisor. This preserves the
+workload's signal, process-group, PTY, and exit-status behavior.
 
 ## Practical Mental Model
 

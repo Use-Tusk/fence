@@ -993,7 +993,7 @@ func quoteRuntimeArgv(argv []string) string {
 func isLinuxBootstrapExecPath(path string) bool {
 	cleaned := filepath.Clean(path)
 	switch cleaned {
-	case linuxBootstrapShellPath, linuxBootstrapFencePath, linuxBootstrapSocatPath:
+	case linuxBootstrapShellPath, linuxBootstrapFencePath:
 		return true
 	default:
 		return false

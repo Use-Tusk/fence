@@ -42,13 +42,28 @@ Seccomp feature levels:
 - `Seccomp log action` with status `ok` means the kernel accepts `SECCOMP_RET_LOG`
 - `Seccomp user notification` with status `ok` means Fence can install a listener filter; Fence uses this for `command.runtimeExecPolicy: "argv"` on Linux
 
+## Go Bootstrap
+
+Bubblewrap starts a staged Fence helper at
+`/tmp/fence/bin/fence --linux-bootstrap-init`. The initializer validates a
+versioned plan, repairs runtime environment variables, starts a dedicated
+sandbox bridge helper, waits for listener readiness, and then `exec()`s the
+security shim and workload.
+
+Bootstrap setup does not call shell utilities or sandbox-side `socat`. This
+keeps Fence initialization independent from runtime command-deny rules,
+including distributions where many command names share one multicall binary.
+Host-side proxy bridges still require `socat`.
+
 ## Landlock Integration
 
 Landlock is applied via an **embedded wrapper** approach:
 
-1. bwrap spawns `fence --landlock-apply -- <user-command>`
-2. The wrapper applies Landlock kernel restrictions
-3. The wrapper `exec()`s the user command
+1. The Go initializer starts bridge infrastructure before restriction
+2. The initializer `exec()`s `fence --landlock-apply -- <user-command>`
+3. The wrapper resolves the next executable, applies Landlock on the same OS
+   thread that will execute it, and clears its serialized config
+4. The wrapper `exec()`s the user command
 
 This provides **defense-in-depth**: both bwrap mounts AND Landlock kernel restrictions are enforced.
 
@@ -69,7 +84,8 @@ This allows rules like denying `git push` without blocking all `git` execs.
 Requirements:
 
 - Linux kernel with seccomp user notification support (`5.0+`)
-- The Fence CLI binary must be available to host the supervisor path
+- A compatible Fence helper must be configured. The CLI supplies itself;
+  library callers use `Manager.SetLinuxHelperPath`.
 
 Failure mode:
 

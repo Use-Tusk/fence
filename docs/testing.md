@@ -69,7 +69,12 @@ go test -v -count=1 ./internal/sandbox/...
 
 If you're packaging fence for a distribution (e.g., Nix, Homebrew, Debian), note that some integration tests will be skipped when running `go test` during the build.
 
-Fence's Landlock integration on Linux uses a wrapper approach: the `fence` binary re-executes itself with `--landlock-apply` inside the sandbox. Test binaries (e.g., `sandbox.test`) don't have this handler, so Landlock-specific tests automatically skip when not running as the `fence` CLI.
+Fence's Linux Go bootstrap, Landlock integration, and argv-aware runtime policy
+use private helper modes. Test binaries (for example, `sandbox.test`) do not
+dispatch those modes automatically, so Landlock-specific tests skip unless a
+real Fence helper is supplied. Helper-backed integration tests build
+`cmd/fence`, pass it through `Manager.SetLinuxHelperPath`, and exercise the same
+bootstrap used by the CLI.
 
 Tests that skip include those calling `skipIfLandlockNotUsable()`:
 
@@ -83,8 +88,8 @@ Tests that skip include those calling `skipIfLandlockNotUsable()`:
 
 | Test Type | What it tests | Landlock coverage |
 |-----------|---------------|-------------------|
-| `go test` (integration) | Go APIs, bwrap isolation, command blocking | Skipped (test binary can't use `--landlock-apply`) |
-| `smoke_test.sh` | Actual `fence` CLI end-to-end | ✅ Full coverage |
+| `go test` (integration) | Go APIs, bwrap isolation, command blocking, helper-backed bridge paths | Helper-backed tests only |
+| `smoke_test.sh` | Actual `fence` CLI and Go bootstrap end-to-end | ✅ Full coverage |
 
 For full test coverage including Landlock, run the smoke tests against the built binary (see "Smoke Tests" section below).
 

@@ -1,13 +1,20 @@
 package sandbox
 
 import (
+	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 
 	"github.com/fencesandbox/fence/internal/config"
 	"github.com/fencesandbox/fence/internal/fencelog"
 	"github.com/fencesandbox/fence/internal/platform"
 	"github.com/fencesandbox/fence/internal/proxy"
 )
+
+// ErrLinuxHelperRequired indicates that Linux wrapping was requested without
+// an executable capable of dispatching Fence's private helper modes.
+var ErrLinuxHelperRequired = errors.New("Linux sandbox requires an explicit Fence helper")
 
 // ServiceExecutionModel describes how a sandboxed service binds its host-facing
 // listening port. Fence uses this to decide whether to set up a reverse bridge
@@ -110,6 +117,7 @@ type Manager struct {
 	exposedHostPaths    []exposedHostPath
 	shellMode           string
 	shellLogin          bool
+	linuxHelperPath     string
 	debug               bool
 	monitor             bool
 	initialized         bool
@@ -172,6 +180,35 @@ func (m *Manager) SetShellOptions(mode string, login bool) {
 	}
 	m.shellMode = mode
 	m.shellLogin = login
+}
+
+// SetLinuxHelperPath configures an executable that implements Fence's private
+// Linux helper modes. The CLI supplies its own executable; library callers may
+// provide an installed Fence binary or a helper-aware application binary.
+func (m *Manager) SetLinuxHelperPath(path string) error {
+	if path == "" {
+		return fmt.Errorf("SetLinuxHelperPath: empty path")
+	}
+	absolute, err := filepath.Abs(path)
+	if err != nil {
+		return fmt.Errorf("SetLinuxHelperPath: resolve %q: %w", path, err)
+	}
+	resolved, err := filepath.EvalSymlinks(absolute)
+	if err != nil {
+		return fmt.Errorf("SetLinuxHelperPath: resolve symlinks for %q: %w", absolute, err)
+	}
+	info, err := os.Stat(resolved)
+	if err != nil {
+		return fmt.Errorf("SetLinuxHelperPath: stat %q: %w", resolved, err)
+	}
+	if !info.Mode().IsRegular() {
+		return fmt.Errorf("SetLinuxHelperPath: %q is not a regular file", resolved)
+	}
+	if info.Mode().Perm()&0o111 == 0 {
+		return fmt.Errorf("SetLinuxHelperPath: %q is not executable", resolved)
+	}
+	m.linuxHelperPath = resolved
+	return nil
 }
 
 // Initialize sets up the sandbox infrastructure (proxies, etc.).
@@ -250,6 +287,7 @@ func (m *Manager) WrapCommandInDir(command string, workingDir string) (string, e
 			Debug:               m.debug,
 			ShellMode:           m.shellMode,
 			ShellLogin:          m.shellLogin,
+			HelperPath:          m.linuxHelperPath,
 			WorkDir:             workingDir,
 			LocalOutboundBridge: m.localOutboundBridge,
 			ExposedHostPaths:    m.exposedHostPaths,

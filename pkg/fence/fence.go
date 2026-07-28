@@ -14,6 +14,14 @@ func IsSupported() bool {
 	return platform.IsSupported()
 }
 
+// DispatchInternalHelper handles Fence's private process modes. Applications
+// that configure their own executable with Manager.SetLinuxHelperPath must call
+// this before their normal flag parsing and exit with the returned code when
+// handled is true.
+func DispatchInternalHelper(args []string) (handled bool, exitCode int, err error) {
+	return sandbox.DispatchInternalHelper(args)
+}
+
 // Config is the configuration for fence.
 type Config = config.Config
 
@@ -51,6 +59,10 @@ const (
 	RuntimeExecPolicyPath RuntimeExecPolicy = config.RuntimeExecPolicyPath
 	RuntimeExecPolicyArgv RuntimeExecPolicy = config.RuntimeExecPolicyArgv
 )
+
+// ErrLinuxHelperRequired is returned when Linux wrapping is requested without
+// configuring a compatible helper executable.
+var ErrLinuxHelperRequired = sandbox.ErrLinuxHelperRequired
 
 // SSHConfig defines SSH command restrictions.
 type SSHConfig = config.SSHConfig

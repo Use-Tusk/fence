@@ -5,7 +5,6 @@ package sandbox
 import (
 	"crypto/rand"
 	"encoding/hex"
-	"encoding/json"
 	"fmt"
 	"net"
 	"os"
@@ -53,11 +52,10 @@ type ReverseBridge struct {
 // external network isolation.
 //
 // The pattern mirrors LinuxBridge / ReverseBridge: host-side socat listens on
-// a bind-mounted Unix socket and forwards to host 127.0.0.1:<port>, and the
-// sandbox-side socat (started inside the sandbox bootstrap) listens on
-// 127.0.0.1:<port> and forwards to the shared socket. It is only activated
-// when network.allowLocalOutbound is true AND the user has listed the ports
-// in network.allowLocalOutboundPorts.
+// a bind-mounted Unix socket and forwards to host 127.0.0.1:<port>, while the
+// sandbox bridge helper listens on 127.0.0.1:<port> and forwards to the shared
+// socket. It is only activated when network.allowLocalOutbound is true AND the
+// user has listed the ports in network.allowLocalOutboundPorts.
 type LocalOutboundBridge struct {
 	Ports       []int
 	SocketPaths []string
@@ -81,12 +79,14 @@ type LinuxSandboxOptions struct {
 	ShellMode string
 	// Whether to run shell as login shell.
 	ShellLogin bool
+	// Optional executable implementing Fence's private Linux helper modes.
+	// When set, this explicit capability replaces executable-name heuristics.
+	HelperPath string
 	// Working directory the sandbox policy should treat as the workspace root.
 	WorkDir string
 	// Optional host-side forwarder for host-loopback access when
 	// network.allowLocalOutbound is true. When non-nil, the sandbox bootstrap
-	// brings up matching sandbox-side socat listeners bound to 127.0.0.1
-	// on each of the bridge's ports.
+	// brings up matching bridge listeners bound to 127.0.0.1 on each port.
 	LocalOutboundBridge *LocalOutboundBridge
 	// ExposedHostPaths lists host files/directories the caller has explicitly
 	// registered (via Manager.ExposeHostPath) to be visible inside the
@@ -101,15 +101,11 @@ const (
 	linuxBootstrapBinDir    = linuxBootstrapDir + "/bin"
 	linuxBootstrapShellPath = linuxBootstrapBinDir + "/shell"
 	linuxBootstrapFencePath = linuxBootstrapBinDir + "/fence"
-	linuxBootstrapSocatPath = linuxBootstrapBinDir + "/socat"
-	linuxBootstrapInputPath = linuxBootstrapDir + "/bootstrap.stdin"
-	linuxBootstrapLogPath   = linuxBootstrapDir + "/bootstrap.log"
 )
 
 type linuxBootstrapExecutables struct {
 	Shell string
 	Fence string
-	Socat string
 }
 
 type linuxBootstrapExecutableMount struct {
@@ -349,9 +345,9 @@ func (b *LinuxBridge) Cleanup() {
 }
 
 // NewReverseBridge creates Unix socket bridges for inbound connections.
-// Host listens on each ExposedPort's (BindAddress, Port) tuple and forwards
-// to a per-port Unix socket that the sandbox-side socat picks up via
-// UNIX-LISTEN. An empty BindAddress is treated as DefaultExposedBindAddress.
+// Host listens on each ExposedPort's (BindAddress, Port) tuple and forwards to
+// a per-port Unix socket served by the sandbox bridge helper. An empty
+// BindAddress is treated as DefaultExposedBindAddress.
 //
 // Loopback-by-default matters in two places:
 //   - It prevents accidental LAN exposure of in-development services.
@@ -458,9 +454,8 @@ func (b *ReverseBridge) Cleanup() {
 
 // NewLocalOutboundBridge starts host-side socat forwarders that relay
 // connections arriving on per-port Unix sockets to host 127.0.0.1:<port>.
-// The matching sandbox-side socat listeners (which bind sandbox 127.0.0.1
-// and connect into these sockets) are started by the sandbox bootstrap
-// script. Returns nil if the port list is empty.
+// The sandbox bridge helper binds sandbox 127.0.0.1 and connects into these
+// sockets. Returns nil if the port list is empty.
 func NewLocalOutboundBridge(ports []int, debug bool) (*LocalOutboundBridge, error) {
 	if len(ports) == 0 {
 		return nil, nil
@@ -698,86 +693,13 @@ func getMandatoryDenyPaths(cwd string, allowGitConfig bool) []string {
 	return paths
 }
 
-// WrapCommandLinux wraps a command with Linux bubblewrap sandbox.
-// It uses available security features (Landlock, seccomp) with graceful fallback.
-func WrapCommandLinux(cfg *config.Config, command string, bridge *LinuxBridge, reverseBridge *ReverseBridge, debug bool) (string, error) {
-	return WrapCommandLinuxWithOptions(cfg, command, bridge, reverseBridge, LinuxSandboxOptions{
-		UseLandlock: true, // Enabled by default, will fall back if not available
-		UseSeccomp:  true, // Enabled by default
-		UseEBPF:     true, // Enabled by default if available
-		Debug:       debug,
-	})
-}
-
-// WrapCommandLinuxWithShell wraps a command with configurable shell selection.
-func WrapCommandLinuxWithShell(cfg *config.Config, command string, workingDir string, bridge *LinuxBridge, reverseBridge *ReverseBridge, debug bool, shellMode string, shellLogin bool) (string, error) {
-	return WrapCommandLinuxWithOptions(cfg, command, bridge, reverseBridge, LinuxSandboxOptions{
-		UseLandlock: true,
-		UseSeccomp:  true,
-		UseEBPF:     true,
-		Debug:       debug,
-		ShellMode:   shellMode,
-		ShellLogin:  shellLogin,
-		WorkDir:     workingDir,
-	})
-}
-
-func linuxRuntimeEnvScript() string {
-	return `
-fence_runtime_dir_cleanup=
-
-fence_dir_is_usable() {
-    dir=$1
-    probe=
-    [ -n "$dir" ] && [ -d "$dir" ] || return 1
-    probe="$dir/.fence-write-test-$$"
-    (umask 077 && : > "$probe") 2>/dev/null || return 1
-    rm -f "$probe" 2>/dev/null || true
-    return 0
-}
-
-fence_prepare_private_runtime_dir() {
-    dir=
-    dir=$(mktemp -d "/tmp/fence-runtime-$(id -u)-XXXXXX" 2>/dev/null) || return 1
-    chmod 700 "$dir" 2>/dev/null || true
-    if ! fence_dir_is_usable "$dir"; then
-        rm -rf -- "$dir" 2>/dev/null || true
-        return 1
-    fi
-    printf '%s\n' "$dir"
-}
-
-if ! fence_dir_is_usable "${TMPDIR:-}"; then
-    export TMPDIR=/tmp
-fi
-
-fence_runtime_dir=${XDG_RUNTIME_DIR:-}
-if ! fence_dir_is_usable "$fence_runtime_dir"; then
-    fence_runtime_dir=$(fence_prepare_private_runtime_dir 2>/dev/null || true)
-    if [ -z "$fence_runtime_dir" ]; then
-        fence_runtime_dir=
-    else
-        fence_runtime_dir_cleanup="$fence_runtime_dir"
-    fi
-fi
-
-if [ -n "$fence_runtime_dir" ]; then
-    export XDG_RUNTIME_DIR="$fence_runtime_dir"
-else
-    unset XDG_RUNTIME_DIR
-fi
-
-`
-}
-
 func planLinuxBootstrapExecutables(
 	shellPath string,
 	fenceExePath string,
-	needsFence bool,
-	needsSocat bool,
 ) ([]linuxBootstrapExecutableMount, linuxBootstrapExecutables, error) {
 	execs := linuxBootstrapExecutables{
 		Shell: linuxBootstrapShellPath,
+		Fence: linuxBootstrapFencePath,
 	}
 	var mounts []linuxBootstrapExecutableMount
 
@@ -797,22 +719,8 @@ func planLinuxBootstrapExecutables(
 		return nil, linuxBootstrapExecutables{}, err
 	}
 
-	if needsFence {
-		execs.Fence = linuxBootstrapFencePath
-		if err := addMount(fenceExePath, execs.Fence, "fence"); err != nil {
-			return nil, linuxBootstrapExecutables{}, err
-		}
-	}
-
-	if needsSocat {
-		socatPath, err := exec.LookPath("socat")
-		if err != nil {
-			return nil, linuxBootstrapExecutables{}, fmt.Errorf("failed to locate socat for sandbox bootstrap: %w", err)
-		}
-		execs.Socat = linuxBootstrapSocatPath
-		if err := addMount(socatPath, execs.Socat, "socat"); err != nil {
-			return nil, linuxBootstrapExecutables{}, err
-		}
+	if err := addMount(fenceExePath, execs.Fence, "fence"); err != nil {
+		return nil, linuxBootstrapExecutables{}, err
 	}
 
 	return mounts, execs, nil
@@ -832,193 +740,6 @@ func appendLinuxBootstrapExecutableMounts(args []string, mounts []linuxBootstrap
 		args = append(args, "--ro-bind", mount.Source, mount.Destination)
 	}
 	return args
-}
-
-func buildLinuxBootstrapScript(
-	cfg *config.Config,
-	command string,
-	bridge *LinuxBridge,
-	reverseBridge *ReverseBridge,
-	opts LinuxSandboxOptions,
-	useLandlockWrapper bool,
-	bootstrapExecs linuxBootstrapExecutables,
-	shellFlag string,
-) (string, error) {
-	var script strings.Builder
-
-	_, _ = fmt.Fprintf(&script, `
-fence_bootstrap_dir=%s
-mkdir -p "$fence_bootstrap_dir"
-fence_bootstrap_input=%s
-fence_bootstrap_log=%s
-: >"$fence_bootstrap_input"
-: >"$fence_bootstrap_log"
-
-fence_start_helper() {
-    "$@" <"$fence_bootstrap_input" >>"$fence_bootstrap_log" 2>&1 &
-}
-
-fence_wait_for_helpers() {
-    attempts=100
-    while [ "$attempts" -gt 0 ]; do
-        all_alive=1
-`, ShellQuoteSingle(linuxBootstrapDir), ShellQuoteSingle(linuxBootstrapInputPath), ShellQuoteSingle(linuxBootstrapLogPath))
-
-	for _, pidVar := range bootstrapPIDVars(bridge, reverseBridge, opts.LocalOutboundBridge) {
-		_, _ = fmt.Fprintf(&script, `        if ! kill -0 "$%s" >>"$fence_bootstrap_log" 2>&1; then
-            all_alive=0
-        fi
-`, pidVar)
-	}
-	for _, socketPath := range bootstrapSocketPaths(reverseBridge) {
-		_, _ = fmt.Fprintf(&script, `        if [ ! -S %s ]; then
-            all_alive=0
-        fi
-`, ShellQuoteSingle(socketPath))
-	}
-
-	script.WriteString(`        if [ "$all_alive" -eq 1 ]; then
-            return 0
-        fi
-        sleep 0.05
-        attempts=$((attempts - 1))
-    done
-    echo "[fence:linux] bootstrap helpers failed to become ready; see $fence_bootstrap_log" >&2
-    return 1
-}
-
-# Cleanup function
-cleanup() {
-    jobs -p | xargs -r kill >>"$fence_bootstrap_log" 2>&1 || true
-    case "${fence_runtime_dir_cleanup:-}" in
-        /tmp/fence-runtime-*)
-            rm -rf -- "$fence_runtime_dir_cleanup" >>"$fence_bootstrap_log" 2>&1 || true
-            ;;
-    esac
-}
-trap cleanup EXIT
-`)
-	script.WriteString(linuxRuntimeEnvScript())
-
-	if bridge != nil {
-		_, _ = fmt.Fprintf(
-			&script, `
-# Start HTTP proxy listener (port 3128 -> Unix socket -> host HTTP proxy)
-fence_start_helper %s
-HTTP_PID=$!
-
-# Start SOCKS proxy listener (port 1080 -> Unix socket -> host SOCKS proxy)
-fence_start_helper %s
-SOCKS_PID=$!
-
-# Set proxy environment variables
-export HTTP_PROXY=http://127.0.0.1:3128
-export HTTPS_PROXY=http://127.0.0.1:3128
-export http_proxy=http://127.0.0.1:3128
-export https_proxy=http://127.0.0.1:3128
-export ALL_PROXY=socks5h://127.0.0.1:1080
-export all_proxy=socks5h://127.0.0.1:1080
-export NO_PROXY=localhost,127.0.0.1
-export no_proxy=localhost,127.0.0.1
-export FENCE_SANDBOX=1
-
-`,
-			ShellQuote([]string{
-				bootstrapExecs.Socat,
-				fmt.Sprintf("TCP-LISTEN:%d,fork,reuseaddr", 3128),
-				fmt.Sprintf("UNIX-CONNECT:%s", bridge.HTTPSocketPath),
-			}),
-			ShellQuote([]string{
-				bootstrapExecs.Socat,
-				fmt.Sprintf("TCP-LISTEN:%d,fork,reuseaddr", 1080),
-				fmt.Sprintf("UNIX-CONNECT:%s", bridge.SOCKSSocketPath),
-			}),
-		)
-	}
-
-	if reverseBridge != nil && len(reverseBridge.Ports) > 0 {
-		script.WriteString("\n# Start reverse bridge listeners for inbound connections\n")
-		for i, port := range reverseBridge.Ports {
-			socketPath := reverseBridge.SocketPaths[i]
-			_, _ = fmt.Fprintf(
-				&script, "fence_start_helper %s\n",
-				ShellQuote([]string{
-					bootstrapExecs.Socat,
-					fmt.Sprintf("UNIX-LISTEN:%s,fork,reuseaddr", socketPath),
-					fmt.Sprintf("TCP:127.0.0.1:%d", port),
-				}),
-			)
-			_, _ = fmt.Fprintf(&script, "REV_%d_PID=$!\n", port)
-		}
-		script.WriteString("\n")
-	}
-
-	if opts.LocalOutboundBridge != nil && len(opts.LocalOutboundBridge.Ports) > 0 {
-		script.WriteString("\n# Start localhost-outbound bridge listeners so sandbox 127.0.0.1:<port> reaches host 127.0.0.1:<port>\n")
-		for i, port := range opts.LocalOutboundBridge.Ports {
-			socketPath := opts.LocalOutboundBridge.SocketPaths[i]
-			_, _ = fmt.Fprintf(
-				&script, "fence_start_helper %s\n",
-				ShellQuote([]string{
-					bootstrapExecs.Socat,
-					fmt.Sprintf("TCP-LISTEN:%d,bind=127.0.0.1,fork,reuseaddr", port),
-					fmt.Sprintf("UNIX-CONNECT:%s", socketPath),
-				}),
-			)
-			_, _ = fmt.Fprintf(&script, "LO_%d_PID=$!\n", port)
-		}
-		script.WriteString("\n")
-	}
-
-	if len(bootstrapPIDVars(bridge, reverseBridge, opts.LocalOutboundBridge)) > 0 {
-		script.WriteString("fence_wait_for_helpers || exit 1\n\n")
-	}
-
-	if useLandlockWrapper {
-		if cfg != nil {
-			configJSON, err := json.Marshal(cfg)
-			if err == nil {
-				_, _ = fmt.Fprintf(&script, "export FENCE_CONFIG_JSON=%s\n", ShellQuoteSingle(string(configJSON)))
-			}
-		}
-
-		wrapperArgs := []string{bootstrapExecs.Fence, "--landlock-apply"}
-		if opts.Debug {
-			wrapperArgs = append(wrapperArgs, "--debug")
-		}
-		wrapperArgs = append(wrapperArgs, "--", bootstrapExecs.Shell, shellFlag, command)
-		_, _ = fmt.Fprintf(&script, "exec %s\n", ShellQuote(wrapperArgs))
-		return script.String(), nil
-	}
-
-	script.WriteString(command)
-	script.WriteString("\n")
-	return script.String(), nil
-}
-
-func bootstrapPIDVars(bridge *LinuxBridge, reverseBridge *ReverseBridge, localOutboundBridge *LocalOutboundBridge) []string {
-	var pidVars []string
-	if bridge != nil {
-		pidVars = append(pidVars, "HTTP_PID", "SOCKS_PID")
-	}
-	if reverseBridge != nil {
-		for _, port := range reverseBridge.Ports {
-			pidVars = append(pidVars, fmt.Sprintf("REV_%d_PID", port))
-		}
-	}
-	if localOutboundBridge != nil {
-		for _, port := range localOutboundBridge.Ports {
-			pidVars = append(pidVars, fmt.Sprintf("LO_%d_PID", port))
-		}
-	}
-	return pidVars
-}
-
-func bootstrapSocketPaths(reverseBridge *ReverseBridge) []string {
-	if reverseBridge == nil {
-		return nil
-	}
-	return reverseBridge.SocketPaths
 }
 
 func useLinuxInteractivePTYSession(cfg *config.Config, stdinIsTTY bool, stdoutIsTTY bool) bool {
@@ -1130,13 +851,14 @@ func WrapCommandLinuxWithOptions(cfg *config.Config, command string, bridge *Lin
 		fencelog.Printf("[fence:linux] Available features: %s\n", features.Summary())
 	}
 
-	fenceExePath, _ := os.Executable()
-	executableInTmp := strings.HasPrefix(fenceExePath, "/tmp/")
-	executableIsFence := strings.Contains(filepath.Base(fenceExePath), "fence")
+	if opts.HelperPath == "" {
+		return "", fmt.Errorf(
+			"%w; call Manager.SetLinuxHelperPath with the Fence CLI or a helper-aware application",
+			ErrLinuxHelperRequired,
+		)
+	}
+	fenceExePath := opts.HelperPath
 	if useArgvRuntimeExecPolicy {
-		if fenceExePath == "" || !executableIsFence {
-			return "", fmt.Errorf("command.runtimeExecPolicy=%q requires the fence CLI binary (current executable cannot host the runtime supervisor)", config.RuntimeExecPolicyArgv)
-		}
 		if !features.Seccomp.UserNotify {
 			reason := features.Seccomp.UserNotifyError
 			if reason == "" {
@@ -1580,53 +1302,51 @@ func WrapCommandLinuxWithOptions(cfg *config.Config, command string, bridge *Lin
 		bwrapArgs = append(bwrapArgs, "--bind", tmpDir, tmpDir)
 	}
 
-	// Bind each localhost-outbound Unix socket into the sandbox so the
-	// bootstrap-spawned socat listeners can connect back to the host-side
-	// forwarders. Sockets are created on the host before bwrap starts.
+	// Bind each localhost-outbound Unix socket into the sandbox so bridge
+	// listeners can connect back to the host-side forwarders. Sockets are
+	// created on the host before bwrap starts.
 	if opts.LocalOutboundBridge != nil {
 		for _, socketPath := range opts.LocalOutboundBridge.SocketPaths {
 			bwrapArgs = append(bwrapArgs, "--bind", socketPath, socketPath)
 		}
 	}
 
-	// Skip Landlock wrapper if executable is in /tmp (test binaries are built there)
-	// The wrapper won't work because --tmpfs /tmp hides the test binary
-	// Skip Landlock wrapper if fence is being used as a library (executable is not fence)
-	// The wrapper re-executes the binary with --landlock-apply, which only fence understands
-	useLandlockWrapper := opts.UseLandlock && features.CanUseLandlock() && fenceExePath != "" && !executableInTmp && executableIsFence
-
-	if opts.Debug && executableInTmp {
-		fencelog.Printf("[fence:linux] Skipping Landlock wrapper (executable in /tmp, likely a test)\n")
-	}
-	if opts.Debug && !executableIsFence {
-		fencelog.Printf("[fence:linux] Skipping Landlock wrapper (running as library, not fence CLI)\n")
-	}
-
+	useLandlockWrapper := opts.UseLandlock && features.CanUseLandlock()
 	bootstrapMounts, bootstrapExecs, err := planLinuxBootstrapExecutables(
 		shellPath,
 		fenceExePath,
-		useLandlockWrapper || useArgvRuntimeExecPolicy,
-		bridge != nil ||
-			(reverseBridge != nil && len(reverseBridge.Ports) > 0) ||
-			(opts.LocalOutboundBridge != nil && len(opts.LocalOutboundBridge.Ports) > 0),
 	)
 	if err != nil {
 		return "", err
 	}
 	bwrapArgs = appendLinuxBootstrapExecutableMounts(bwrapArgs, bootstrapMounts)
 
-	innerScript, err := buildLinuxBootstrapScript(cfg, command, bridge, reverseBridge, opts, useLandlockWrapper, bootstrapExecs, shellFlag)
+	bootstrapPlan, err := buildLinuxBootstrapPlan(
+		cfg,
+		command,
+		bridge,
+		reverseBridge,
+		opts.LocalOutboundBridge,
+		bootstrapExecs,
+		shellFlag,
+		useLandlockWrapper,
+		useArgvRuntimeExecPolicy,
+		opts.Debug,
+	)
 	if err != nil {
 		return "", err
 	}
-	if useArgvRuntimeExecPolicy {
-		bwrapArgs = append(bwrapArgs, "--", bootstrapExecs.Fence, linuxArgvExecShimMode)
-		if opts.Debug {
-			bwrapArgs = append(bwrapArgs, "--debug")
-		}
-		bwrapArgs = append(bwrapArgs, "--", bootstrapExecs.Shell, shellFlag, innerScript)
-	} else {
-		bwrapArgs = append(bwrapArgs, "--", bootstrapExecs.Shell, shellFlag, innerScript)
+	encodedPlan, err := encodeLinuxBootstrapPlan(bootstrapPlan)
+	if err != nil {
+		return "", err
+	}
+	bwrapArgs = append(
+		bwrapArgs,
+		"--setenv", linuxBootstrapPlanEnv, string(encodedPlan),
+		"--", bootstrapExecs.Fence, "--linux-bootstrap-init",
+	)
+	if opts.Debug {
+		fencelog.Printf("[fence:linux] Using Go-based Linux bootstrap\n")
 	}
 
 	if opts.Debug {
