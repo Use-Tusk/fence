@@ -42,7 +42,7 @@ func (m *Manager) initializePlatformNetworking() error {
 		if m.debug {
 			m.logDebug("Skipping reverse bridge (ServiceBindsOnHost: external daemon binds ports %v outside sandbox netns)", m.service.resolvedPorts())
 		}
-	case !features.CanUnshareNet:
+	case !useNetworkNamespace:
 		if m.debug {
 			m.logDebug("Skipping reverse bridge (no network namespace, ports accessible directly)")
 		}
@@ -62,7 +62,7 @@ func (m *Manager) initializePlatformNetworking() error {
 	// unshare the network namespace (otherwise sandbox 127.0.0.1 already
 	// is the host's 127.0.0.1 and no forwarding is needed). Wildcard
 	// relaxed mode drops --unshare-net too, so skip there.
-	if m.config != nil && m.config.Network.EffectiveAllowLocalOutbound() && features.CanUnshareNet && !hasWildcardAllowedDomain(m.config) {
+	if m.config != nil && m.config.Network.EffectiveAllowLocalOutbound() && useNetworkNamespace {
 		ports := m.config.Network.AllowLocalOutboundPorts
 		if len(ports) > 0 {
 			loBridge, err := NewLocalOutboundBridge(ports, m.debug)

@@ -852,6 +852,7 @@ func TestLinux_NetworkBlocksDevTcp(t *testing.T) {
 
 func TestLinux_SharedNetworkUsesDirectProxyPorts(t *testing.T) {
 	skipIfAlreadySandboxed(t)
+	skipIfCommandNotFound(t, "python3")
 
 	httpReservation, err := net.Listen("tcp", "127.0.0.1:3128")
 	if err != nil {
@@ -867,9 +868,16 @@ func TestLinux_SharedNetworkUsesDirectProxyPorts(t *testing.T) {
 	workspace := createTempWorkspace(t)
 	cfg := testConfigWithWorkspace(workspace)
 	cfg.Network.AllowedDomains = []string{"*"}
+	exposureReservation, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("reserve exposed port: %v", err)
+	}
+	exposedPort := exposureReservation.Addr().(*net.TCPAddr).Port
+	_ = exposureReservation.Close()
 
 	manager := NewManager(cfg, false, false)
 	configureIntegrationManager(t, manager)
+	manager.SetService(ServiceOptions{Exposures: []ExposedPort{LoopbackPort(exposedPort)}})
 	defer manager.Cleanup()
 	if err := manager.Initialize(); err != nil {
 		t.Fatalf("Initialize() error = %v", err)
@@ -877,9 +885,15 @@ func TestLinux_SharedNetworkUsesDirectProxyPorts(t *testing.T) {
 	if manager.linuxBridge.HTTPSocketPath != "" || manager.linuxBridge.SOCKSSocketPath != "" {
 		t.Fatalf("shared-network mode unexpectedly created Unix proxy bridges: %+v", manager.linuxBridge)
 	}
+	if manager.reverseBridge != nil {
+		t.Fatalf("shared-network mode unexpectedly created a reverse bridge: %+v", manager.reverseBridge)
+	}
 
 	wrapped, err := manager.WrapCommandInDir(
-		`printf 'HTTP=%s\nALL=%s\n' "$HTTP_PROXY" "$ALL_PROXY"`,
+		fmt.Sprintf(
+			`printf 'HTTP=%%s\nALL=%%s\n' "$HTTP_PROXY" "$ALL_PROXY"; python3 -c "import socket; s=socket.socket(); s.bind(('127.0.0.1', %d)); print('BOUND'); s.close()"`,
+			exposedPort,
+		),
 		workspace,
 	)
 	if err != nil {
@@ -892,6 +906,7 @@ func TestLinux_SharedNetworkUsesDirectProxyPorts(t *testing.T) {
 	}
 	assertContains(t, result.Stdout, "HTTP=http://127.0.0.1:")
 	assertContains(t, result.Stdout, "ALL=socks5h://127.0.0.1:")
+	assertContains(t, result.Stdout, "BOUND")
 }
 
 // TestLinux_ExposedPortAllowsHostReachability verifies the helper-backed

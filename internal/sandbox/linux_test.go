@@ -673,6 +673,23 @@ func TestWrapCommandLinuxWithOptions_AllowWriteTmpKeepsPrivateTmpfs(t *testing.T
 	}
 }
 
+func TestLinuxDedicatedWritableMount(t *testing.T) {
+	for _, test := range []struct {
+		path string
+		want bool
+	}{
+		{path: "/tmp", want: true},
+		{path: "/tmp/", want: true},
+		{path: "/private/tmp", want: false},
+	} {
+		t.Run(test.path, func(t *testing.T) {
+			if got := linuxDedicatedWritableMount(test.path); got != test.want {
+				t.Fatalf("linuxDedicatedWritableMount(%q) = %v, want %v", test.path, got, test.want)
+			}
+		})
+	}
+}
+
 func TestWrapCommandLinuxWithOptions_ExposedHostPathsEmitBinds(t *testing.T) {
 	if _, err := exec.LookPath("bwrap"); err != nil {
 		t.Skip("bwrap not available")

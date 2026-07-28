@@ -626,12 +626,7 @@ func resolvePathForMount(path string) (string, bool) {
 }
 
 func linuxDedicatedWritableMount(path string) bool {
-	switch filepath.Clean(path) {
-	case "/tmp", "/private/tmp":
-		return true
-	default:
-		return false
-	}
+	return filepath.Clean(path) == "/tmp"
 }
 
 // sameDevice returns true if both paths reside on the same filesystem (device).
