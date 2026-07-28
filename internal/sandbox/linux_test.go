@@ -1098,3 +1098,65 @@ func TestWrapCommandLinuxWithOptions_DefaultDenyReadDenyReadWinsInsideExemptDirI
 		t.Fatalf("denyRead mask is shadowed by the exempt rebind: %s", cmd)
 	}
 }
+
+// An explicitly granted symlink inside a masked dangerous directory must stay
+// readable at the name the policy granted: canonicalizing it away would leave
+// the link path itself buried under the tmpfs.
+func TestWrapCommandLinuxWithOptions_DefaultDenyReadKeepsAllowedSymlinkInsideDangerousDir(t *testing.T) {
+	if _, err := exec.LookPath("bwrap"); err != nil {
+		t.Skip("bwrap not available")
+	}
+
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	cwd := t.TempDir()
+	t.Chdir(cwd)
+
+	shared := filepath.Join(cwd, "shared")
+	if err := os.MkdirAll(shared, 0o755); err != nil {
+		t.Fatalf("failed to create shared dir: %v", err)
+	}
+	target := filepath.Join(shared, "settings.json")
+	if err := os.WriteFile(target, []byte("{}"), 0o644); err != nil {
+		t.Fatalf("failed to create settings.json: %v", err)
+	}
+
+	vscode := filepath.Join(cwd, ".vscode")
+	if err := os.MkdirAll(vscode, 0o755); err != nil {
+		t.Fatalf("failed to create .vscode dir: %v", err)
+	}
+	link := filepath.Join(vscode, "settings.json")
+	if err := os.Symlink(target, link); err != nil {
+		t.Fatalf("failed to create symlink: %v", err)
+	}
+
+	cfg := &config.Config{
+		Filesystem: config.FilesystemConfig{
+			DefaultDenyRead: true,
+			AllowRead:       []string{link},
+		},
+	}
+
+	cmd, err := WrapCommandLinuxWithOptions(cfg, "echo ok", nil, nil, LinuxSandboxOptions{
+		UseLandlock: false,
+		UseSeccomp:  false,
+		UseEBPF:     false,
+		ShellMode:   ShellModeDefault,
+	})
+	if err != nil {
+		t.Fatalf("WrapCommandLinuxWithOptions failed: %v", err)
+	}
+
+	mask := strings.LastIndex(cmd, ShellQuote([]string{"--tmpfs", vscode}))
+	if mask < 0 {
+		t.Fatalf("expected dangerous directory to stay masked: %s", cmd)
+	}
+	bind := strings.LastIndex(cmd, ShellQuote([]string{"--ro-bind", target, link}))
+	if bind < 0 {
+		t.Fatalf("granted symlink inside dangerous dir was not exposed at its granted path: %s", cmd)
+	}
+	if bind < mask {
+		t.Fatalf("granted symlink bind is shadowed by the later mask: %s", cmd)
+	}
+}

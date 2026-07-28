@@ -26,8 +26,13 @@ const (
 )
 
 type linuxLateMount struct {
+	// Path is where the mount lands inside the sandbox.
 	Path string
-	Kind linuxLateMountKind
+	// Source is the host path bound at Path. It only differs from Path for
+	// exempt binds of granted symlinks, where the resolved target has to show
+	// up under the name the policy granted.
+	Source string
+	Kind   linuxLateMountKind
 }
 
 type linuxLateMountPlanner struct {
@@ -39,7 +44,20 @@ func newLinuxLateMountPlanner() *linuxLateMountPlanner {
 }
 
 func (p *linuxLateMountPlanner) Add(path string, kind linuxLateMountKind) {
+	p.add(path, path, kind)
+}
+
+// AddExempt plans a read-only bind that survives a masked ancestor directory.
+// source is the resolved host path; path is where it is exposed inside the
+// sandbox. The two differ when the granted path is a symlink: binding only the
+// canonical target would leave the granted name itself buried under the mask.
+func (p *linuxLateMountPlanner) AddExempt(source, path string) {
+	p.add(source, path, linuxLateMountReadOnlyExempt)
+}
+
+func (p *linuxLateMountPlanner) add(source, path string, kind linuxLateMountKind) {
 	path = filepath.Clean(path)
+	source = filepath.Clean(source)
 	if path == "" || path == "." {
 		return
 	}
@@ -61,6 +79,7 @@ func (p *linuxLateMountPlanner) Add(path string, kind linuxLateMountKind) {
 		}
 
 		p.mounts[i].Kind = kind
+		p.mounts[i].Source = source
 		switch kind {
 		case linuxLateMountMaskDir:
 			p.removeDescendants(path, func(mount linuxLateMount) bool {
@@ -89,7 +108,7 @@ func (p *linuxLateMountPlanner) Add(path string, kind linuxLateMountKind) {
 		})
 	}
 
-	p.mounts = append(p.mounts, linuxLateMount{Path: path, Kind: kind})
+	p.mounts = append(p.mounts, linuxLateMount{Path: path, Source: source, Kind: kind})
 }
 
 func (p *linuxLateMountPlanner) hasStrictAncestor(path string, kind linuxLateMountKind) bool {
@@ -178,7 +197,11 @@ func appendLinuxLateMounts(args []string, mounts []linuxLateMount) []string {
 		case linuxLateMountMaskFile:
 			args = append(args, "--ro-bind", "/dev/null", mount.Path)
 		case linuxLateMountReadOnly, linuxLateMountReadOnlyExempt:
-			args = append(args, "--ro-bind", mount.Path, mount.Path)
+			source := mount.Source
+			if source == "" {
+				source = mount.Path
+			}
+			args = append(args, "--ro-bind", source, mount.Path)
 		}
 	}
 	return args
@@ -283,8 +306,8 @@ func appendLinuxLatePolicyMounts(
 				// directory. Re-mount those on top of the tmpfs so the grant
 				// survives; everything else in the directory stays hidden, and
 				// the read-only bind keeps it unwritable.
-				for _, grantPath := range explicitlyReadableDescendants(cfg, mountPath) {
-					planner.Add(grantPath, linuxLateMountReadOnlyExempt)
+				for _, grant := range explicitlyReadableDescendants(cfg, path, mountPath) {
+					planner.AddExempt(grant.Source, grant.Path)
 				}
 			} else {
 				planner.Add(mountPath, linuxLateMountMaskFile)
@@ -314,33 +337,82 @@ func appendLinuxLatePolicyMounts(
 	return appendLinuxLateMounts(bwrapArgs, planner.Mounts())
 }
 
-// explicitlyReadableDescendants returns the resolved paths strictly under dir
-// that the config explicitly grants read access to (allowWrite grants read, so
-// it counts here too).
+// expandGrantPatterns expands the configured patterns without canonicalizing
+// the plain ones. ExpandGlobPatterns resolves symlinks, which is what the mount
+// source needs but hides the path the policy actually named — and that name is
+// what a mask has to be punctured at.
+func expandGrantPatterns(patterns []string) []string {
+	var expanded []string
+	seen := make(map[string]bool)
+	for _, pattern := range patterns {
+		var paths []string
+		if ContainsGlobChars(pattern) {
+			paths = ExpandGlobPatterns([]string{pattern})
+		} else {
+			paths = []string{NormalizePathLexical(pattern)}
+		}
+		for _, path := range paths {
+			if seen[path] {
+				continue
+			}
+			seen[path] = true
+			expanded = append(expanded, path)
+		}
+	}
+	return expanded
+}
+
+// linuxLateMountExemption is a grant that has to be re-exposed on top of a
+// masked directory: Source is the resolved host path, Path is the granted
+// location inside the sandbox.
+type linuxLateMountExemption struct {
+	Source string
+	Path   string
+}
+
+// explicitlyReadableDescendants returns the grants strictly under a masked
+// directory that the config explicitly gives read access to (allowWrite grants
+// read, so it counts here too). lexicalDir is the directory as the policy spells
+// it and dir is its resolved form; a grant counts when either spelling puts it
+// inside, because either one is what the mask hides.
+//
+// The granted path is kept as the mount destination instead of its canonical
+// target: a symlink under the mask only stays reachable if the resolved file is
+// bound back at the link's own path.
 //
 // denyRead is re-checked per path rather than relying on the planner's masked
 // ancestor rule: exempt mounts deliberately punch through a masked directory,
 // so a denied path must be filtered out here or the mask would leak.
-func explicitlyReadableDescendants(cfg *config.Config, dir string) []string {
+func explicitlyReadableDescendants(cfg *config.Config, lexicalDir, dir string) []linuxLateMountExemption {
 	if cfg == nil {
 		return nil
 	}
 
+	lexicalDir = filepath.Clean(lexicalDir)
 	patterns := slices.Concat(
 		cfg.Filesystem.AllowRead,
 		cfg.Filesystem.AllowExecute,
 		cfg.Filesystem.AllowWrite,
 	)
 
-	var paths []string
+	var grants []linuxLateMountExemption
 	seen := make(map[string]bool)
-	for _, path := range ExpandGlobPatterns(patterns) {
+	for _, path := range expandGrantPatterns(patterns) {
 		mountPath, ok := resolvePathForMount(path)
 		if !ok {
 			continue
 		}
 		mountPath = filepath.Clean(mountPath)
-		if mountPath == dir || !linuxPathContains(dir, mountPath) || seen[mountPath] {
+
+		grantPath := filepath.Clean(path)
+		switch {
+		case grantPath != lexicalDir && linuxPathContains(lexicalDir, grantPath):
+		case mountPath != dir && linuxPathContains(dir, mountPath):
+			grantPath = mountPath
+		default:
+			continue
+		}
+		if seen[grantPath] {
 			continue
 		}
 		if _, denied := matchPathRule(path, cfg.Filesystem.DenyRead); denied {
@@ -349,10 +421,10 @@ func explicitlyReadableDescendants(cfg *config.Config, dir string) []string {
 		if _, denied := matchPathRule(mountPath, cfg.Filesystem.DenyRead); denied {
 			continue
 		}
-		seen[mountPath] = true
-		paths = append(paths, mountPath)
+		seen[grantPath] = true
+		grants = append(grants, linuxLateMountExemption{Source: mountPath, Path: grantPath})
 	}
-	return paths
+	return grants
 }
 
 // readableUnderPolicy reports whether the config explicitly grants read access
