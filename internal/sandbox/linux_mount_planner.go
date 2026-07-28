@@ -217,7 +217,13 @@ func appendLinuxLatePolicyMounts(
 		if !ok {
 			continue
 		}
-		if defaultDenyRead {
+		// Dangerous-path protection is a write concept: shell startup files
+		// stay readable, they just cannot be written (see CheckReadPath, which
+		// deliberately skips dangerous paths). A read-only self-bind expresses
+		// that. In defaultDenyRead mode the same bind would also *expose* a
+		// path the read policy never granted — root is not bound there — so
+		// those get masked instead of rebound.
+		if defaultDenyRead && !readableUnderPolicy(cfg, path, mountPath) {
 			if isDirectory(mountPath) {
 				planner.Add(mountPath, linuxLateMountMaskDir)
 			} else {
@@ -246,4 +252,45 @@ func appendLinuxLatePolicyMounts(
 	}
 
 	return appendLinuxLateMounts(bwrapArgs, planner.Mounts())
+}
+
+// readableUnderPolicy reports whether the config explicitly grants read access
+// to any of the given spellings of a path. Callers pass both the policy-facing
+// path and its symlink-resolved mount path: a rule like allowRead
+// "~/dotfiles/*" only matches the resolved target, while "~/.zshrc" normalizes
+// to the target and matches either way.
+//
+// Only explicit grants count. The default readable system paths are
+// deliberately excluded: some of them (notably /tmp) are replaced by a tmpfs
+// in defaultDenyRead mode, so a self-bind there would surface a host file the
+// sandbox never had. denyRead always wins.
+func readableUnderPolicy(cfg *config.Config, paths ...string) bool {
+	if cfg == nil {
+		return false
+	}
+	for _, path := range paths {
+		if path == "" {
+			continue
+		}
+		if _, denied := matchPathRule(path, cfg.Filesystem.DenyRead); denied {
+			return false
+		}
+	}
+	// allowWrite grants read, mirroring CheckReadPath's allow tiers.
+	grants := [][]string{
+		cfg.Filesystem.AllowRead,
+		cfg.Filesystem.AllowExecute,
+		cfg.Filesystem.AllowWrite,
+	}
+	for _, path := range paths {
+		if path == "" {
+			continue
+		}
+		for _, rules := range grants {
+			if _, ok := matchPathRule(path, rules); ok {
+				return true
+			}
+		}
+	}
+	return false
 }

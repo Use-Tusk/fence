@@ -824,3 +824,105 @@ func TestWrapCommandLinuxWithOptions_DenyReadFileWinsOverSamePathDenyWrite(t *te
 		t.Fatalf("did not expect denyWrite to rebind a masked file: %s", cmd)
 	}
 }
+
+// A dangerous file that the read policy explicitly allows must stay readable
+// in defaultDenyRead mode: the mandatory-deny mount protects writes, it is not
+// a read denial. Regression test for allowRead entries being silently
+// overridden by the /dev/null mask, including via a symlink from $HOME.
+func TestWrapCommandLinuxWithOptions_DefaultDenyReadKeepsAllowedDangerousFileReadable(t *testing.T) {
+	if _, err := exec.LookPath("bwrap"); err != nil {
+		t.Skip("bwrap not available")
+	}
+
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	dotfiles := filepath.Join(home, "dotfiles")
+	if err := os.MkdirAll(dotfiles, 0o755); err != nil {
+		t.Fatalf("failed to create dotfiles dir: %v", err)
+	}
+	zshrc := filepath.Join(dotfiles, ".zshrc")
+	if err := os.WriteFile(zshrc, []byte("# zshrc"), 0o644); err != nil {
+		t.Fatalf("failed to create .zshrc: %v", err)
+	}
+	if err := os.Symlink(zshrc, filepath.Join(home, ".zshrc")); err != nil {
+		t.Fatalf("failed to symlink ~/.zshrc: %v", err)
+	}
+
+	// A dangerous file the policy does NOT grant must still be masked.
+	bashrc := filepath.Join(home, ".bashrc")
+	if err := os.WriteFile(bashrc, []byte("# bashrc"), 0o644); err != nil {
+		t.Fatalf("failed to create .bashrc: %v", err)
+	}
+
+	cfg := &config.Config{
+		Filesystem: config.FilesystemConfig{
+			DefaultDenyRead: true,
+			AllowRead:       []string{filepath.Join(dotfiles, "*")},
+		},
+	}
+
+	cmd, err := WrapCommandLinuxWithOptions(cfg, "echo ok", nil, nil, LinuxSandboxOptions{
+		UseLandlock: false,
+		UseSeccomp:  false,
+		UseEBPF:     false,
+		ShellMode:   ShellModeDefault,
+	})
+	if err != nil {
+		t.Fatalf("WrapCommandLinuxWithOptions failed: %v", err)
+	}
+
+	if strings.Contains(cmd, ShellQuote([]string{"--ro-bind", "/dev/null", zshrc})) {
+		t.Fatalf("allowRead dangerous file was masked: %s", cmd)
+	}
+	if !strings.Contains(cmd, ShellQuote([]string{"--ro-bind", zshrc, zshrc})) {
+		t.Fatalf("expected read-only self-bind for allowRead dangerous file: %s", cmd)
+	}
+	if !strings.Contains(cmd, ShellQuote([]string{"--ro-bind", "/dev/null", bashrc})) {
+		t.Fatalf("expected mask for dangerous file outside allowRead: %s", cmd)
+	}
+}
+
+// denyRead must still win over an allowRead entry covering the same dangerous
+// file, so the mask stays in place.
+func TestWrapCommandLinuxWithOptions_DefaultDenyReadDenyReadWinsOverAllowedDangerousFile(t *testing.T) {
+	if _, err := exec.LookPath("bwrap"); err != nil {
+		t.Skip("bwrap not available")
+	}
+
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	zshrc := filepath.Join(home, ".zshrc")
+	if err := os.WriteFile(zshrc, []byte("# zshrc"), 0o644); err != nil {
+		t.Fatalf("failed to create .zshrc: %v", err)
+	}
+
+	cfg := &config.Config{
+		Filesystem: config.FilesystemConfig{
+			DefaultDenyRead: true,
+			AllowRead:       []string{zshrc},
+			DenyRead:        []string{zshrc},
+		},
+	}
+
+	cmd, err := WrapCommandLinuxWithOptions(cfg, "echo ok", nil, nil, LinuxSandboxOptions{
+		UseLandlock: false,
+		UseSeccomp:  false,
+		UseEBPF:     false,
+		ShellMode:   ShellModeDefault,
+	})
+	if err != nil {
+		t.Fatalf("WrapCommandLinuxWithOptions failed: %v", err)
+	}
+
+	// The allowRead bind is still emitted early; what matters is that the
+	// denyRead mask comes after it, so the mask is the effective mount.
+	mask := strings.LastIndex(cmd, ShellQuote([]string{"--ro-bind", "/dev/null", zshrc}))
+	if mask < 0 {
+		t.Fatalf("expected denyRead to mask the dangerous file: %s", cmd)
+	}
+	if selfBind := strings.LastIndex(cmd, ShellQuote([]string{"--ro-bind", zshrc, zshrc})); selfBind > mask {
+		t.Fatalf("denyRead mask was overridden by a later readable rebind: %s", cmd)
+	}
+}
