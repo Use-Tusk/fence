@@ -1160,3 +1160,99 @@ func TestWrapCommandLinuxWithOptions_DefaultDenyReadKeepsAllowedSymlinkInsideDan
 		t.Fatalf("granted symlink bind is shadowed by the later mask: %s", cmd)
 	}
 }
+
+// allowRead naming a symlink must expose the file at that name: mounts are made
+// at canonical paths, and defaultDenyRead never binds the directory the link
+// lives in, so without an alias the granted name does not exist at all.
+func TestWrapCommandLinuxWithOptions_DefaultDenyReadKeepsAllowedSymlinkReadable(t *testing.T) {
+	if _, err := exec.LookPath("bwrap"); err != nil {
+		t.Skip("bwrap not available")
+	}
+
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	cwd := t.TempDir()
+	t.Chdir(cwd)
+
+	target := filepath.Join(cwd, "dotfiles", "zshrc")
+	if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
+		t.Fatalf("failed to create dotfiles dir: %v", err)
+	}
+	if err := os.WriteFile(target, []byte("export A=1\n"), 0o644); err != nil {
+		t.Fatalf("failed to create zshrc: %v", err)
+	}
+	link := filepath.Join(cwd, "zshrc")
+	if err := os.Symlink(target, link); err != nil {
+		t.Fatalf("failed to create symlink: %v", err)
+	}
+
+	cfg := &config.Config{
+		Filesystem: config.FilesystemConfig{
+			DefaultDenyRead: true,
+			AllowRead:       []string{link},
+		},
+	}
+
+	cmd, err := WrapCommandLinuxWithOptions(cfg, "echo ok", nil, nil, LinuxSandboxOptions{
+		UseLandlock: false,
+		UseSeccomp:  false,
+		UseEBPF:     false,
+		ShellMode:   ShellModeDefault,
+	})
+	if err != nil {
+		t.Fatalf("WrapCommandLinuxWithOptions failed: %v", err)
+	}
+
+	if !strings.Contains(cmd, ShellQuote([]string{"--ro-bind", target, link})) {
+		t.Fatalf("granted symlink was not exposed at its granted path: %s", cmd)
+	}
+}
+
+// The alias must not become a hole in denyRead: deny mounts land on the
+// canonical path, so a denied path gets no alias at all.
+func TestWrapCommandLinuxWithOptions_DefaultDenyReadDenyReadWinsOverSymlinkAlias(t *testing.T) {
+	if _, err := exec.LookPath("bwrap"); err != nil {
+		t.Skip("bwrap not available")
+	}
+
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	cwd := t.TempDir()
+	t.Chdir(cwd)
+
+	target := filepath.Join(cwd, "dotfiles", "zshrc")
+	if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
+		t.Fatalf("failed to create dotfiles dir: %v", err)
+	}
+	if err := os.WriteFile(target, []byte("export A=1\n"), 0o644); err != nil {
+		t.Fatalf("failed to create zshrc: %v", err)
+	}
+	link := filepath.Join(cwd, "zshrc")
+	if err := os.Symlink(target, link); err != nil {
+		t.Fatalf("failed to create symlink: %v", err)
+	}
+
+	cfg := &config.Config{
+		Filesystem: config.FilesystemConfig{
+			DefaultDenyRead: true,
+			AllowRead:       []string{link},
+			DenyRead:        []string{link},
+		},
+	}
+
+	cmd, err := WrapCommandLinuxWithOptions(cfg, "echo ok", nil, nil, LinuxSandboxOptions{
+		UseLandlock: false,
+		UseSeccomp:  false,
+		UseEBPF:     false,
+		ShellMode:   ShellModeDefault,
+	})
+	if err != nil {
+		t.Fatalf("WrapCommandLinuxWithOptions failed: %v", err)
+	}
+
+	if strings.Contains(cmd, ShellQuote([]string{"--ro-bind", target, link})) {
+		t.Fatalf("denied symlink was aliased past its mask: %s", cmd)
+	}
+}

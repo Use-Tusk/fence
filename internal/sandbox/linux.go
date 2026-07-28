@@ -1273,6 +1273,25 @@ func WrapCommandLinuxWithOptions(cfg *config.Config, command string, bridge *Lin
 			}
 		}
 
+		// A granted path whose own spelling is a symlink is only bound at its
+		// canonical target above, and defaultDenyRead never binds the directory
+		// the link itself lives in, so the granted name would not exist inside
+		// the sandbox at all. Expose the target under that name too.
+		if cfg != nil {
+			denied := cfg.Filesystem.DenyRead
+			aliases := linuxSymlinkGrantAliases(
+				slices.Concat(cfg.Filesystem.AllowRead, cfg.Filesystem.AllowExecute),
+				denied,
+			)
+			for _, alias := range aliases {
+				if boundPaths[alias.Path] {
+					continue
+				}
+				boundPaths[alias.Path] = true
+				bwrapArgs = append(bwrapArgs, "--ro-bind", alias.Source, alias.Path)
+			}
+		}
+
 		// WSL interop: bind /init when wslInterop is active
 		features := DetectLinuxFeatures()
 		wslInterop := features.IsWSL
@@ -1424,6 +1443,16 @@ func WrapCommandLinuxWithOptions(cfg *config.Config, command string, bridge *Lin
 	for p := range writablePaths {
 		if fileExists(p) {
 			bwrapArgs = append(bwrapArgs, "--bind", p, p)
+		}
+	}
+
+	// Same symlink-spelling problem as the read binds above, but the alias has
+	// to stay writable. Only needed in defaultDenyRead mode: the read-only root
+	// bind otherwise already exposes the link itself.
+	if defaultDenyRead && cfg != nil {
+		denied := slices.Concat(cfg.Filesystem.DenyRead, cfg.Filesystem.DenyWrite)
+		for _, alias := range linuxSymlinkGrantAliases(cfg.Filesystem.AllowWrite, denied) {
+			bwrapArgs = append(bwrapArgs, "--bind", alias.Source, alias.Path)
 		}
 	}
 

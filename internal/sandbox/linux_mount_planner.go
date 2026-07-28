@@ -337,6 +337,46 @@ func appendLinuxLatePolicyMounts(
 	return appendLinuxLateMounts(bwrapArgs, planner.Mounts())
 }
 
+// linuxGrantAlias is a granted path whose own spelling is a symlink: Source is
+// the resolved host path, Path is the name the policy used.
+type linuxGrantAlias struct {
+	Source string
+	Path   string
+}
+
+// linuxSymlinkGrantAliases returns the aliases needed for granted patterns that
+// name a symlink. Mounts are made at canonical paths, so without an alias the
+// granted name is missing inside the sandbox. Patterns matched by the caller's
+// deny list are skipped: an alias must never expose a path at a name the deny
+// rules cover, since the deny mounts land on the canonical path only.
+func linuxSymlinkGrantAliases(patterns, denied []string) []linuxGrantAlias {
+	var aliases []linuxGrantAlias
+	seen := make(map[string]bool)
+	for _, pattern := range patterns {
+		if ContainsGlobChars(pattern) {
+			continue
+		}
+		lexical := filepath.Clean(NormalizePathLexical(pattern))
+		resolved, ok := resolvePathForMount(lexical)
+		if !ok {
+			continue
+		}
+		resolved = filepath.Clean(resolved)
+		if resolved == lexical || seen[lexical] {
+			continue
+		}
+		if _, deny := matchPathRule(lexical, denied); deny {
+			continue
+		}
+		if _, deny := matchPathRule(resolved, denied); deny {
+			continue
+		}
+		seen[lexical] = true
+		aliases = append(aliases, linuxGrantAlias{Source: resolved, Path: lexical})
+	}
+	return aliases
+}
+
 // expandGrantPatterns expands the configured patterns without canonicalizing
 // the plain ones. ExpandGlobPatterns resolves symlinks, which is what the mount
 // source needs but hides the path the policy actually named — and that name is
