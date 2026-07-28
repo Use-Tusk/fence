@@ -44,7 +44,11 @@ func (p *linuxLateMountPlanner) Add(path string, kind linuxLateMountKind) {
 		return
 	}
 
-	if kind != linuxLateMountReadOnlyExempt && p.hasStrictAncestor(path, linuxLateMountMaskDir) {
+	// A read-only self-bind under a masked directory would puncture the mask.
+	// Masks under a masked directory are kept instead of dropped here: an exempt
+	// bind added later can re-expose the subtree they live in, and then they are
+	// what keeps denyRead winning. Mounts() drops the ones that stay redundant.
+	if kind == linuxLateMountReadOnly && p.hasStrictAncestor(path, linuxLateMountMaskDir) {
 		return
 	}
 
@@ -60,7 +64,7 @@ func (p *linuxLateMountPlanner) Add(path string, kind linuxLateMountKind) {
 		switch kind {
 		case linuxLateMountMaskDir:
 			p.removeDescendants(path, func(mount linuxLateMount) bool {
-				return mount.Kind != linuxLateMountReadOnlyExempt
+				return mount.Kind == linuxLateMountReadOnly
 			})
 		case linuxLateMountReadOnly:
 			p.removeDescendants(path, func(mount linuxLateMount) bool {
@@ -77,7 +81,7 @@ func (p *linuxLateMountPlanner) Add(path string, kind linuxLateMountKind) {
 	switch kind {
 	case linuxLateMountMaskDir:
 		p.removeDescendants(path, func(mount linuxLateMount) bool {
-			return mount.Kind != linuxLateMountReadOnlyExempt
+			return mount.Kind == linuxLateMountReadOnly
 		})
 	case linuxLateMountReadOnly:
 		p.removeDescendants(path, func(mount linuxLateMount) bool {
@@ -100,6 +104,42 @@ func (p *linuxLateMountPlanner) hasStrictAncestor(path string, kind linuxLateMou
 	return false
 }
 
+// isRedundantMask reports whether a mask mount is already covered by a masked
+// ancestor directory. It is not redundant when an exempt bind sits between the
+// two: that bind re-exposes the host subtree, so the mask is the only thing
+// still hiding the path. Sorting by depth then puts the mask after the bind it
+// has to override.
+func (p *linuxLateMountPlanner) isRedundantMask(mount linuxLateMount) bool {
+	if mount.Kind != linuxLateMountMaskFile && mount.Kind != linuxLateMountMaskDir {
+		return false
+	}
+
+	maskDir, masked := p.deepestStrictAncestor(mount.Path, linuxLateMountMaskDir)
+	if !masked {
+		return false
+	}
+	exempt, exempted := p.deepestStrictAncestor(mount.Path, linuxLateMountReadOnlyExempt)
+	return !exempted || !linuxPathContains(maskDir, exempt)
+}
+
+func (p *linuxLateMountPlanner) deepestStrictAncestor(path string, kind linuxLateMountKind) (string, bool) {
+	best := ""
+	found := false
+	for _, mount := range p.mounts {
+		if mount.Kind != kind || mount.Path == path {
+			continue
+		}
+		if !linuxPathContains(mount.Path, path) {
+			continue
+		}
+		if !found || linuxLateMountDepth(mount.Path) > linuxLateMountDepth(best) {
+			best = mount.Path
+			found = true
+		}
+	}
+	return best, found
+}
+
 func (p *linuxLateMountPlanner) removeDescendants(path string, shouldRemove func(linuxLateMount) bool) {
 	filtered := p.mounts[:0]
 	for _, mount := range p.mounts {
@@ -112,7 +152,13 @@ func (p *linuxLateMountPlanner) removeDescendants(path string, shouldRemove func
 }
 
 func (p *linuxLateMountPlanner) Mounts() []linuxLateMount {
-	mounts := slices.Clone(p.mounts)
+	mounts := make([]linuxLateMount, 0, len(p.mounts))
+	for _, mount := range p.mounts {
+		if p.isRedundantMask(mount) {
+			continue
+		}
+		mounts = append(mounts, mount)
+	}
 	slices.SortFunc(mounts, func(a, b linuxLateMount) int {
 		depthA := linuxLateMountDepth(a.Path)
 		depthB := linuxLateMountDepth(b.Path)

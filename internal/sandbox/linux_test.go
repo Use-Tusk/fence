@@ -1035,3 +1035,66 @@ func TestWrapCommandLinuxWithOptions_DefaultDenyReadDenyReadWinsOverFileInsideDa
 		t.Fatalf("denyRead mask was punctured by an exempt rebind: %s", cmd)
 	}
 }
+
+// The exemption re-exposes a granted subtree inside a masked dangerous
+// directory, so denyRead entries under that subtree must survive the mask and
+// be reapplied on top of the rebind.
+func TestWrapCommandLinuxWithOptions_DefaultDenyReadDenyReadWinsInsideExemptDirInDangerousDir(t *testing.T) {
+	if _, err := exec.LookPath("bwrap"); err != nil {
+		t.Skip("bwrap not available")
+	}
+
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	cwd := t.TempDir()
+	t.Chdir(cwd)
+
+	vscode := filepath.Join(cwd, ".vscode")
+	shared := filepath.Join(vscode, "shared")
+	if err := os.MkdirAll(shared, 0o755); err != nil {
+		t.Fatalf("failed to create .vscode/shared dir: %v", err)
+	}
+	settings := filepath.Join(shared, "settings.json")
+	if err := os.WriteFile(settings, []byte("{}"), 0o644); err != nil {
+		t.Fatalf("failed to create settings.json: %v", err)
+	}
+	secret := filepath.Join(shared, "secret.json")
+	if err := os.WriteFile(secret, []byte("{}"), 0o644); err != nil {
+		t.Fatalf("failed to create secret.json: %v", err)
+	}
+
+	cfg := &config.Config{
+		Filesystem: config.FilesystemConfig{
+			DefaultDenyRead: true,
+			AllowRead:       []string{shared},
+			DenyRead:        []string{secret},
+		},
+	}
+
+	cmd, err := WrapCommandLinuxWithOptions(cfg, "echo ok", nil, nil, LinuxSandboxOptions{
+		UseLandlock: false,
+		UseSeccomp:  false,
+		UseEBPF:     false,
+		ShellMode:   ShellModeDefault,
+	})
+	if err != nil {
+		t.Fatalf("WrapCommandLinuxWithOptions failed: %v", err)
+	}
+
+	mask := strings.LastIndex(cmd, ShellQuote([]string{"--tmpfs", vscode}))
+	if mask < 0 {
+		t.Fatalf("expected dangerous directory to stay masked: %s", cmd)
+	}
+	bind := strings.LastIndex(cmd, ShellQuote([]string{"--ro-bind", shared, shared}))
+	if bind < mask {
+		t.Fatalf("expected granted subtree to be rebound over the mask: %s", cmd)
+	}
+	denied := strings.LastIndex(cmd, ShellQuote([]string{"--ro-bind", "/dev/null", secret}))
+	if denied < 0 {
+		t.Fatalf("denyRead file was dropped by the dangerous directory mask: %s", cmd)
+	}
+	if denied < bind {
+		t.Fatalf("denyRead mask is shadowed by the exempt rebind: %s", cmd)
+	}
+}
