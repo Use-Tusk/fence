@@ -645,6 +645,34 @@ func TestWrapCommandLinuxWithOptions_RootBindPrecedesSpecialMounts(t *testing.T)
 	}
 }
 
+func TestWrapCommandLinuxWithOptions_AllowWriteTmpKeepsPrivateTmpfs(t *testing.T) {
+	if _, err := exec.LookPath("bwrap"); err != nil {
+		t.Skip("bwrap not available")
+	}
+
+	cfg := &config.Config{
+		Filesystem: config.FilesystemConfig{
+			AllowWrite: []string{"/tmp"},
+		},
+	}
+	cmd, err := WrapCommandLinuxWithOptions(cfg, "echo ok", nil, nil, LinuxSandboxOptions{
+		UseLandlock: false,
+		UseSeccomp:  false,
+		UseEBPF:     false,
+		ShellMode:   ShellModeDefault,
+		HelperPath:  testLinuxHelperPath(t),
+	})
+	if err != nil {
+		t.Fatalf("WrapCommandLinuxWithOptions failed: %v", err)
+	}
+	if !strings.Contains(cmd, ShellQuote([]string{"--tmpfs", "/tmp"})) {
+		t.Fatalf("expected private /tmp tmpfs in command: %s", cmd)
+	}
+	if strings.Contains(cmd, ShellQuote([]string{"--bind", "/tmp", "/tmp"})) {
+		t.Fatalf("allowWrite /tmp must not replace the private tmpfs with host /tmp: %s", cmd)
+	}
+}
+
 func TestWrapCommandLinuxWithOptions_ExposedHostPathsEmitBinds(t *testing.T) {
 	if _, err := exec.LookPath("bwrap"); err != nil {
 		t.Skip("bwrap not available")

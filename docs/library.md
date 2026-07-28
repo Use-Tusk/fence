@@ -359,11 +359,21 @@ type FilesystemConfig struct {
 
 ```go
 type CommandConfig struct {
-    Deny        []string // Command patterns to block
-    Allow       []string // Exceptions to deny rules
-    UseDefaults *bool    // Use default deny list (true if nil)
+    Deny              []string          // Command patterns to block
+    Allow             []string          // Exceptions to deny rules
+    UseDefaults       *bool              // Use default deny list (true if nil)
+    RuntimeExecPolicy RuntimeExecPolicy // "path" (default) or Linux-only "argv"
 }
 ```
+
+Enable argv-aware runtime enforcement for child processes on Linux:
+
+```go
+cfg.Command.RuntimeExecPolicy = fence.RuntimeExecPolicyArgv
+```
+
+This mode requires the Linux helper setup described under
+`SetLinuxHelperPath`.
 
 ### SSHConfig
 

@@ -70,11 +70,12 @@ go test -v -count=1 ./internal/sandbox/...
 If you're packaging fence for a distribution (e.g., Nix, Homebrew, Debian), note that some integration tests will be skipped when running `go test` during the build.
 
 Fence's Linux Go bootstrap, Landlock integration, and argv-aware runtime policy
-use private helper modes. Test binaries (for example, `sandbox.test`) do not
-dispatch those modes automatically, so Landlock-specific tests skip unless a
-real Fence helper is supplied. Helper-backed integration tests build
-`cmd/fence`, pass it through `Manager.SetLinuxHelperPath`, and exercise the same
-bootstrap used by the CLI.
+use private helper modes. On Linux, the sandbox test binary's `TestMain`
+dispatches those modes, so `sandbox.test` can act as its own helper. The listed
+legacy Landlock assertions still skip because their host-visible assumptions
+are incompatible with the `/tmp`-overlaid Go bootstrap—not because helper
+dispatch is unavailable. Dedicated helper-backed tests and the CLI smoke suite
+exercise the current bootstrap and Landlock paths.
 
 Tests that skip include those calling `skipIfLandlockNotUsable()`:
 

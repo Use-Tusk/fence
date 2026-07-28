@@ -850,6 +850,50 @@ func TestLinux_NetworkBlocksDevTcp(t *testing.T) {
 	assertBlocked(t, result)
 }
 
+func TestLinux_SharedNetworkUsesDirectProxyPorts(t *testing.T) {
+	skipIfAlreadySandboxed(t)
+
+	httpReservation, err := net.Listen("tcp", "127.0.0.1:3128")
+	if err != nil {
+		t.Skipf("cannot reserve host HTTP facade port: %v", err)
+	}
+	defer func() { _ = httpReservation.Close() }()
+	socksReservation, err := net.Listen("tcp", "127.0.0.1:1080")
+	if err != nil {
+		t.Skipf("cannot reserve host SOCKS facade port: %v", err)
+	}
+	defer func() { _ = socksReservation.Close() }()
+
+	workspace := createTempWorkspace(t)
+	cfg := testConfigWithWorkspace(workspace)
+	cfg.Network.AllowedDomains = []string{"*"}
+
+	manager := NewManager(cfg, false, false)
+	configureIntegrationManager(t, manager)
+	defer manager.Cleanup()
+	if err := manager.Initialize(); err != nil {
+		t.Fatalf("Initialize() error = %v", err)
+	}
+	if manager.linuxBridge.HTTPSocketPath != "" || manager.linuxBridge.SOCKSSocketPath != "" {
+		t.Fatalf("shared-network mode unexpectedly created Unix proxy bridges: %+v", manager.linuxBridge)
+	}
+
+	wrapped, err := manager.WrapCommandInDir(
+		`printf 'HTTP=%s\nALL=%s\n' "$HTTP_PROXY" "$ALL_PROXY"`,
+		workspace,
+	)
+	if err != nil {
+		t.Fatalf("WrapCommandInDir() error = %v", err)
+	}
+	result := executeShellCommand(t, wrapped, workspace)
+	assertAllowed(t, result)
+	if strings.Contains(result.Stdout, ":3128") || strings.Contains(result.Stdout, ":1080") {
+		t.Fatalf("shared-network proxy environment used reserved facade ports:\n%s", result.Stdout)
+	}
+	assertContains(t, result.Stdout, "HTTP=http://127.0.0.1:")
+	assertContains(t, result.Stdout, "ALL=socks5h://127.0.0.1:")
+}
+
 // TestLinux_ExposedPortAllowsHostReachability verifies the helper-backed
 // library path can expose a sandboxed localhost service back to the host.
 func TestLinux_ExposedPortAllowsHostReachability(t *testing.T) {
@@ -1202,8 +1246,19 @@ func TestLinux_XDGRuntimeDirFallbackIsCleanedUpOnExit(t *testing.T) {
 	if runtimeDir == "" {
 		t.Fatal("expected sandbox output to include XDG runtime dir")
 	}
-	if _, err := os.Stat(runtimeDir); !os.IsNotExist(err) {
-		t.Fatalf("expected fallback runtime dir %q to be cleaned up, stat err=%v", runtimeDir, err)
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		_, err := os.Stat(runtimeDir)
+		if os.IsNotExist(err) {
+			break
+		}
+		if err != nil {
+			t.Fatalf("stat fallback runtime dir %q: %v", runtimeDir, err)
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("expected fallback runtime dir %q to be cleaned up", runtimeDir)
+		}
+		time.Sleep(10 * time.Millisecond)
 	}
 }
 

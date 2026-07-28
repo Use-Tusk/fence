@@ -12,6 +12,8 @@ import (
 type LinuxBridge struct {
 	HTTPSocketPath  string
 	SOCKSSocketPath string
+	HTTPProxyPort   int
+	SOCKSProxyPort  int
 }
 
 // ReverseBridge is a stub for non-Linux platforms.

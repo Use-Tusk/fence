@@ -333,7 +333,9 @@ versioned bootstrap plan, repairs runtime environment variables, starts one
 bridge helper, waits for listener readiness, and then `exec()`s the security
 shim and workload. Keeping `linux-init` short-lived preserves the workload's
 process identity, signals, PTY behavior, and exit status. The bridge helper
-watches the workload through a pidfd and exits when the workload does.
+watches the workload through a pidfd and exits when the workload does. On
+kernels or restricted environments where `pidfd_open` is unavailable, it
+falls back to polling for a parent-PID change.
 
 Linux enforcement also layers in:
 
@@ -364,7 +366,11 @@ In `argv` mode, the Linux path adds a small helper pipeline:
 If the environment does not support network namespaces (common in some
 containers/CI setups), Fence can still configure proxies and filesystem policy,
 but direct-network isolation becomes a best-effort proxy-oriented fallback
-rather than a hard namespace boundary.
+rather than a hard namespace boundary. In this shared-network mode (also used
+for wildcard network policy), Fence skips the Unix-socket proxy bridge and
+points proxy environment variables directly at the host proxy's random
+loopback ports. The fixed sandbox facade ports 3128 and 1080 are used only
+inside an isolated network namespace.
 
 ## Inbound Connections (Reverse Bridge)
 

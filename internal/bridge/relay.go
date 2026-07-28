@@ -8,9 +8,15 @@ import (
 	"net"
 	"os"
 	"sync"
+	"syscall"
+	"time"
 )
 
-const defaultUnixSocketMode = 0o600
+const (
+	defaultUnixSocketMode    = 0o600
+	defaultMaxConnections    = 256
+	acceptResourceRetryDelay = 50 * time.Millisecond
+)
 
 type Spec struct {
 	ListenNetwork  string
@@ -18,6 +24,7 @@ type Spec struct {
 	TargetNetwork  string
 	TargetAddress  string
 	UnlinkExisting bool
+	MaxConnections int
 }
 
 type Relay struct {
@@ -30,6 +37,7 @@ type Relay struct {
 
 	connectionsMu sync.Mutex
 	connections   map[net.Conn]struct{}
+	slots         chan struct{}
 
 	errors chan error
 }
@@ -61,12 +69,17 @@ func Start(ctx context.Context, spec Spec) (*Relay, error) {
 		}
 	}
 
-	relayCtx, cancel := context.WithCancel(ctx)
+	relayCtx, cancel := context.WithCancel(ctx) // #nosec G118 -- cancel is retained by Relay and called from Close
+	maxConnections := spec.MaxConnections
+	if maxConnections == 0 {
+		maxConnections = defaultMaxConnections
+	}
 	relay := &Relay{
 		spec:        spec,
 		listener:    listener,
 		cancel:      cancel,
 		connections: make(map[net.Conn]struct{}),
+		slots:       make(chan struct{}, maxConnections),
 		errors:      make(chan error, 1),
 	}
 	relay.wg.Add(1)
@@ -109,12 +122,24 @@ func (r *Relay) acceptLoop(ctx context.Context) {
 		conn, err := r.listener.Accept()
 		if err != nil {
 			if ctx.Err() == nil {
+				if isRetryableAcceptResourceError(err) {
+					if waitForAcceptRetry(ctx) {
+						continue
+					}
+					return
+				}
 				select {
 				case r.errors <- fmt.Errorf("accept on %s %q: %w", r.spec.ListenNetwork, r.spec.ListenAddress, err):
 				default:
 				}
 			}
 			return
+		}
+		select {
+		case r.slots <- struct{}{}:
+		default:
+			_ = conn.Close()
+			continue
 		}
 		r.trackConnection(conn)
 		r.wg.Add(1)
@@ -124,6 +149,7 @@ func (r *Relay) acceptLoop(ctx context.Context) {
 
 func (r *Relay) handleConnection(ctx context.Context, incoming net.Conn) {
 	defer r.wg.Done()
+	defer func() { <-r.slots }()
 	defer r.untrackConnection(incoming)
 
 	target, err := (&net.Dialer{}).DialContext(ctx, r.spec.TargetNetwork, r.spec.TargetAddress)
@@ -213,5 +239,26 @@ func validateSpec(spec Spec) error {
 	if spec.TargetAddress == "" {
 		return fmt.Errorf("target address is empty")
 	}
+	if spec.MaxConnections < 0 {
+		return fmt.Errorf("maximum connections cannot be negative")
+	}
 	return nil
+}
+
+func isRetryableAcceptResourceError(err error) bool {
+	return errors.Is(err, syscall.EMFILE) ||
+		errors.Is(err, syscall.ENFILE) ||
+		errors.Is(err, syscall.ENOBUFS) ||
+		errors.Is(err, syscall.ENOMEM)
+}
+
+func waitForAcceptRetry(ctx context.Context) bool {
+	timer := time.NewTimer(acceptResourceRetryDelay)
+	defer timer.Stop()
+	select {
+	case <-timer.C:
+		return true
+	case <-ctx.Done():
+		return false
+	}
 }

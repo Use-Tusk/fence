@@ -9,13 +9,22 @@ import (
 )
 
 func (m *Manager) initializePlatformNetworking() error {
-	bridge, err := NewLinuxBridge(m.httpPort, m.socksPort, m.debug)
-	if err != nil {
-		_ = m.httpProxy.Stop()
-		_ = m.socksProxy.Stop()
-		return fmt.Errorf("failed to initialize Linux bridge: %w", err)
+	features := DetectLinuxFeatures()
+	useNetworkNamespace := features.CanUnshareNet && !hasWildcardAllowedDomain(m.config)
+	if useNetworkNamespace {
+		bridge, err := NewLinuxBridge(m.httpPort, m.socksPort, m.debug)
+		if err != nil {
+			_ = m.httpProxy.Stop()
+			_ = m.socksProxy.Stop()
+			return fmt.Errorf("failed to initialize Linux bridge: %w", err)
+		}
+		m.linuxBridge = bridge
+	} else {
+		m.linuxBridge = newDirectLinuxBridge(m.httpPort, m.socksPort, m.debug)
+		if m.debug {
+			m.logDebug("Using direct host proxy ports (network namespace not active)")
+		}
 	}
-	m.linuxBridge = bridge
 
 	// Set up reverse bridge for exposed ports (inbound connections).
 	// Only needed when:
@@ -25,7 +34,6 @@ func (m *Manager) initializePlatformNetworking() error {
 	//       ServiceBindsOnHost (docker, podman, ...), the port is bound by
 	//       an external daemon outside the netns; a reverse bridge on the
 	//       same port would collide with the daemon's bind.
-	features := DetectLinuxFeatures()
 	exposures := m.service.resolvedExposures()
 	switch {
 	case len(exposures) == 0:

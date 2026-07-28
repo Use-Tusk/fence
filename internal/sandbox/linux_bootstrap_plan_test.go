@@ -4,6 +4,7 @@ package sandbox
 
 import (
 	"reflect"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -256,6 +257,57 @@ func TestBuildLinuxBootstrapPlanIncludesEveryBridgeDirection(t *testing.T) {
 	}
 }
 
+func TestBuildLinuxBootstrapPlanUsesDirectProxyPortsWithoutNetworkNamespace(t *testing.T) {
+	plan, err := buildLinuxBootstrapPlan(
+		&config.Config{},
+		"echo ok",
+		newDirectLinuxBridge(41001, 41002, false),
+		nil,
+		nil,
+		linuxBootstrapExecutables{
+			Shell: linuxBootstrapShellPath,
+			Fence: linuxBootstrapFencePath,
+		},
+		"-c",
+		false,
+		false,
+		false,
+	)
+	if err != nil {
+		t.Fatalf("buildLinuxBootstrapPlan() error = %v", err)
+	}
+	if len(plan.Bridges) != 0 {
+		t.Fatalf("direct proxy plan unexpectedly contains bridge listeners: %#v", plan.Bridges)
+	}
+	if got := plan.Runtime.Set["HTTP_PROXY"]; got != "http://127.0.0.1:41001" {
+		t.Fatalf("HTTP_PROXY = %q, want direct host proxy port", got)
+	}
+	if got := plan.Runtime.Set["ALL_PROXY"]; got != "socks5h://127.0.0.1:41002" {
+		t.Fatalf("ALL_PROXY = %q, want direct host proxy port", got)
+	}
+}
+
+func TestBuildLinuxBootstrapPlanRejectsPartialProxySocketBridge(t *testing.T) {
+	_, err := buildLinuxBootstrapPlan(
+		&config.Config{},
+		"echo ok",
+		&LinuxBridge{HTTPSocketPath: "/tmp/fence-http.sock"},
+		nil,
+		nil,
+		linuxBootstrapExecutables{
+			Shell: linuxBootstrapShellPath,
+			Fence: linuxBootstrapFencePath,
+		},
+		"-c",
+		false,
+		false,
+		false,
+	)
+	if err == nil || !strings.Contains(err.Error(), "both HTTP and SOCKS socket paths") {
+		t.Fatalf("buildLinuxBootstrapPlan() error = %v, want partial-bridge error", err)
+	}
+}
+
 func TestBuildLinuxBootstrapPlanComposesArgvAndLandlockShims(t *testing.T) {
 	plan, err := buildLinuxBootstrapPlan(
 		&config.Config{},
@@ -294,6 +346,59 @@ func TestBuildLinuxBootstrapPlanComposesArgvAndLandlockShims(t *testing.T) {
 	}
 	if plan.Runtime.Set["FENCE_CONFIG_JSON"] == "" {
 		t.Fatal("expected serialized Landlock config in runtime environment")
+	}
+}
+
+func TestBuildLinuxBootstrapPlanRejectsReservedLocalOutboundPorts(t *testing.T) {
+	for _, port := range []int{linuxBootstrapHTTPProxyPort, linuxBootstrapSOCKSProxyPort} {
+		t.Run(strconv.Itoa(port), func(t *testing.T) {
+			_, err := buildLinuxBootstrapPlan(
+				&config.Config{},
+				"echo ok",
+				&LinuxBridge{
+					HTTPSocketPath:  "/tmp/fence-http.sock",
+					SOCKSSocketPath: "/tmp/fence-socks.sock",
+				},
+				nil,
+				&LocalOutboundBridge{
+					Ports:       []int{port},
+					SocketPaths: []string{"/tmp/fence-local.sock"},
+				},
+				linuxBootstrapExecutables{
+					Shell: linuxBootstrapShellPath,
+					Fence: linuxBootstrapFencePath,
+				},
+				"-c",
+				false,
+				false,
+				false,
+			)
+			if err == nil || !strings.Contains(err.Error(), "reserved in-sandbox proxy port") {
+				t.Fatalf("buildLinuxBootstrapPlan() error = %v, want reserved-port error", err)
+			}
+		})
+	}
+}
+
+func TestLinuxBootstrapPlanRejectsDuplicateListeners(t *testing.T) {
+	plan := validLinuxBootstrapPlan()
+	plan.Bridges = []linuxBootstrapBridgeSpec{
+		{
+			ListenNetwork: "tcp",
+			ListenAddress: "127.0.0.1:8080",
+			TargetNetwork: "unix",
+			TargetAddress: "/tmp/first.sock",
+		},
+		{
+			ListenNetwork: "tcp",
+			ListenAddress: "127.0.0.1:8080",
+			TargetNetwork: "unix",
+			TargetAddress: "/tmp/second.sock",
+		},
+	}
+	_, err := encodeLinuxBootstrapPlan(plan)
+	if err == nil || !strings.Contains(err.Error(), "both listen on tcp 127.0.0.1:8080") {
+		t.Fatalf("encodeLinuxBootstrapPlan() error = %v, want duplicate-listener error", err)
 	}
 }
 

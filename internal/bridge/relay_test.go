@@ -165,3 +165,114 @@ func TestRelayContextCancellationClosesActiveConnections(t *testing.T) {
 		t.Fatalf("Close() error = %v", err)
 	}
 }
+
+func TestRelayRejectsExcessConnectionsWithoutStoppingListener(t *testing.T) {
+	targetListener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen for target: %v", err)
+	}
+	defer func() { _ = targetListener.Close() }()
+
+	firstAccepted := make(chan struct{})
+	releaseFirst := make(chan struct{})
+	go func() {
+		accepted := 0
+		for {
+			conn, err := targetListener.Accept()
+			if err != nil {
+				return
+			}
+			accepted++
+			go func(conn net.Conn, number int) {
+				defer func() { _ = conn.Close() }()
+				if number == 1 {
+					close(firstAccepted)
+					<-releaseFirst
+					return
+				}
+				payload, err := io.ReadAll(conn)
+				if err == nil {
+					_, _ = conn.Write(payload)
+				}
+			}(conn, accepted)
+		}
+	}()
+
+	relay, err := Start(context.Background(), Spec{
+		ListenNetwork:  "tcp",
+		ListenAddress:  "127.0.0.1:0",
+		TargetNetwork:  "tcp",
+		TargetAddress:  targetListener.Addr().String(),
+		MaxConnections: 1,
+	})
+	if err != nil {
+		t.Fatalf("Start() error = %v", err)
+	}
+	defer func() { _ = relay.Close() }()
+
+	first, err := net.Dial("tcp", relay.Addr().String())
+	if err != nil {
+		t.Fatalf("dial first connection: %v", err)
+	}
+	defer func() { _ = first.Close() }()
+	select {
+	case <-firstAccepted:
+	case <-time.After(2 * time.Second):
+		t.Fatal("target did not accept first connection")
+	}
+
+	excess, err := net.Dial("tcp", relay.Addr().String())
+	if err != nil {
+		t.Fatalf("dial excess connection: %v", err)
+	}
+	if _, err := excess.Write([]byte("rejected")); err == nil {
+		_ = excess.SetReadDeadline(time.Now().Add(2 * time.Second))
+		if _, err := excess.Read(make([]byte, 1)); err == nil {
+			t.Fatal("excess connection remained open")
+		}
+	}
+	_ = excess.Close()
+
+	_ = first.Close()
+	close(releaseFirst)
+
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		client, err := net.DialTCP("tcp", nil, relay.Addr().(*net.TCPAddr))
+		if err == nil {
+			_, writeErr := client.Write([]byte("accepted"))
+			closeWriteErr := client.CloseWrite()
+			_ = client.SetReadDeadline(time.Now().Add(200 * time.Millisecond))
+			response, readErr := io.ReadAll(client)
+			_ = client.Close()
+			if writeErr == nil && closeWriteErr == nil && readErr == nil && string(response) == "accepted" {
+				break
+			}
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("relay did not accept a new connection after capacity was released")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	select {
+	case err := <-relay.Errors():
+		if err != nil {
+			t.Fatalf("relay stopped after rejecting an excess connection: %v", err)
+		}
+	default:
+	}
+}
+
+func TestRelayRejectsNegativeConnectionLimit(t *testing.T) {
+	_, err := Start(context.Background(), Spec{
+		ListenNetwork:  "tcp",
+		ListenAddress:  "127.0.0.1:0",
+		TargetNetwork:  "tcp",
+		TargetAddress:  "127.0.0.1:1",
+		MaxConnections: -1,
+	})
+	if err == nil {
+		t.Fatal("Start() succeeded with a negative connection limit")
+	}
+}

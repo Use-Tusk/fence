@@ -67,8 +67,6 @@ func RunLandlockWrapper(args []string) (int, error) {
 			if debugMode {
 				fencelog.Printf("[fence:landlock-wrapper] Warning: Landlock not applied: %v\n", err)
 			}
-		} else if debugMode {
-			fencelog.Printf("[fence:landlock-wrapper] Landlock restrictions applied\n")
 		}
 	}
 

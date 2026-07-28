@@ -124,7 +124,9 @@ Failure mode:
 
 - **Impact**: `--unshare-net` is skipped; network is not fully isolated
 - **Cause**: Running in Docker, GitHub Actions, or other environments without `CAP_NET_ADMIN`
-- **Fallback**: Proxy-based filtering still works; filesystem/PID/seccomp isolation still active
+- **Fallback**: Proxy-based filtering still works through the host proxy's
+  random loopback ports; fixed sandbox facade ports are not bound.
+  Filesystem/PID/seccomp isolation remains active.
 - **Check**: Run `fence --linux-features` and look for `Network namespace` with status `unavailable`
 - **Workaround**: Run with `sudo`, or in Docker use `--cap-add=NET_ADMIN`
 

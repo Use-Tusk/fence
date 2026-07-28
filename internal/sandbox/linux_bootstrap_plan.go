@@ -19,6 +19,8 @@ const (
 	linuxBootstrapPlanVersion    = 1
 	linuxBootstrapPlanMaxBytes   = 120 * 1024
 	linuxBootstrapPlanMaxBridges = 1024
+	linuxBootstrapHTTPProxyPort  = 3128
+	linuxBootstrapSOCKSProxyPort = 1080
 )
 
 type linuxBootstrapBridgeSpec struct {
@@ -78,26 +80,46 @@ func buildLinuxBootstrapPlan(
 	}
 
 	if bridge != nil {
-		plan.Bridges = append(
-			plan.Bridges,
-			linuxBootstrapBridgeSpec{
-				ListenNetwork: "tcp",
-				ListenAddress: "127.0.0.1:3128",
-				TargetNetwork: "unix",
-				TargetAddress: bridge.HTTPSocketPath,
-			},
-			linuxBootstrapBridgeSpec{
-				ListenNetwork: "tcp",
-				ListenAddress: "127.0.0.1:1080",
-				TargetNetwork: "unix",
-				TargetAddress: bridge.SOCKSSocketPath,
-			},
-		)
+		httpPort := linuxBootstrapHTTPProxyPort
+		socksPort := linuxBootstrapSOCKSProxyPort
+		hasHTTPSocket := bridge.HTTPSocketPath != ""
+		hasSOCKSSocket := bridge.SOCKSSocketPath != ""
+		if hasHTTPSocket != hasSOCKSSocket {
+			return linuxBootstrapPlan{}, fmt.Errorf("Linux proxy bridge must provide both HTTP and SOCKS socket paths")
+		}
+		if hasHTTPSocket {
+			plan.Bridges = append(
+				plan.Bridges,
+				linuxBootstrapBridgeSpec{
+					ListenNetwork: "tcp",
+					ListenAddress: net.JoinHostPort("127.0.0.1", strconv.Itoa(httpPort)),
+					TargetNetwork: "unix",
+					TargetAddress: bridge.HTTPSocketPath,
+				},
+				linuxBootstrapBridgeSpec{
+					ListenNetwork: "tcp",
+					ListenAddress: net.JoinHostPort("127.0.0.1", strconv.Itoa(socksPort)),
+					TargetNetwork: "unix",
+					TargetAddress: bridge.SOCKSSocketPath,
+				},
+			)
+		} else {
+			if bridge.HTTPProxyPort < 1 || bridge.HTTPProxyPort > 65535 ||
+				bridge.SOCKSProxyPort < 1 || bridge.SOCKSProxyPort > 65535 {
+				return linuxBootstrapPlan{}, fmt.Errorf(
+					"direct Linux proxy ports must be in range 1-65535 (HTTP=%d, SOCKS=%d)",
+					bridge.HTTPProxyPort,
+					bridge.SOCKSProxyPort,
+				)
+			}
+			httpPort = bridge.HTTPProxyPort
+			socksPort = bridge.SOCKSProxyPort
+		}
 		for _, key := range []string{"HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy"} {
-			plan.Runtime.Set[key] = "http://127.0.0.1:3128"
+			plan.Runtime.Set[key] = fmt.Sprintf("http://127.0.0.1:%d", httpPort)
 		}
 		for _, key := range []string{"ALL_PROXY", "all_proxy"} {
-			plan.Runtime.Set[key] = "socks5h://127.0.0.1:1080"
+			plan.Runtime.Set[key] = fmt.Sprintf("socks5h://127.0.0.1:%d", socksPort)
 		}
 		plan.Runtime.Set["NO_PROXY"] = "localhost,127.0.0.1,::1"
 		plan.Runtime.Set["no_proxy"] = "localhost,127.0.0.1,::1"
@@ -130,6 +152,12 @@ func buildLinuxBootstrapPlan(
 			)
 		}
 		for i, port := range localOutboundBridge.Ports {
+			if port == linuxBootstrapHTTPProxyPort || port == linuxBootstrapSOCKSProxyPort {
+				return linuxBootstrapPlan{}, fmt.Errorf(
+					"network.allowLocalOutboundPorts entry %d conflicts with a reserved in-sandbox proxy port",
+					port,
+				)
+			}
 			plan.Bridges = append(plan.Bridges, linuxBootstrapBridgeSpec{
 				ListenNetwork: "tcp",
 				ListenAddress: net.JoinHostPort("127.0.0.1", strconv.Itoa(port)),
@@ -174,34 +202,37 @@ func buildLinuxBootstrapPlan(
 }
 
 func encodeLinuxBootstrapPlan(plan linuxBootstrapPlan) ([]byte, error) {
-	if err := plan.validate(); err != nil {
-		return nil, err
-	}
-	data, err := json.Marshal(plan)
-	if err != nil {
-		return nil, fmt.Errorf("encode Linux bootstrap plan: %w", err)
-	}
-	if len(data) > linuxBootstrapPlanMaxBytes {
-		return nil, fmt.Errorf(
-			"Linux bootstrap plan is %d bytes; maximum is %d",
-			len(data),
-			linuxBootstrapPlanMaxBytes,
-		)
-	}
-	return data, nil
+	return encodeLinuxBootstrapJSON(plan, "Linux bootstrap plan")
 }
 
 func encodeLinuxBootstrapBridgePlan(plan linuxBootstrapBridgePlan) ([]byte, error) {
+	return encodeLinuxBootstrapJSON(plan, "Linux bootstrap bridge plan")
+}
+
+func decodeLinuxBootstrapPlan(r io.Reader) (linuxBootstrapPlan, error) {
+	return decodeLinuxBootstrapJSON[linuxBootstrapPlan](r, "Linux bootstrap plan")
+}
+
+func decodeLinuxBootstrapBridgePlan(r io.Reader) (linuxBootstrapBridgePlan, error) {
+	return decodeLinuxBootstrapJSON[linuxBootstrapBridgePlan](r, "Linux bootstrap bridge plan")
+}
+
+type linuxBootstrapJSONPlan interface {
+	validate() error
+}
+
+func encodeLinuxBootstrapJSON[T linuxBootstrapJSONPlan](plan T, label string) ([]byte, error) {
 	if err := plan.validate(); err != nil {
 		return nil, err
 	}
 	data, err := json.Marshal(plan)
 	if err != nil {
-		return nil, fmt.Errorf("encode Linux bootstrap bridge plan: %w", err)
+		return nil, fmt.Errorf("encode %s: %w", label, err)
 	}
 	if len(data) > linuxBootstrapPlanMaxBytes {
 		return nil, fmt.Errorf(
-			"Linux bootstrap bridge plan is %d bytes; maximum is %d",
+			"%s is %d bytes; maximum is %d",
+			label,
 			len(data),
 			linuxBootstrapPlanMaxBytes,
 		)
@@ -209,72 +240,45 @@ func encodeLinuxBootstrapBridgePlan(plan linuxBootstrapBridgePlan) ([]byte, erro
 	return data, nil
 }
 
-func decodeLinuxBootstrapPlan(r io.Reader) (linuxBootstrapPlan, error) {
+func decodeLinuxBootstrapJSON[T linuxBootstrapJSONPlan](r io.Reader, label string) (T, error) {
+	var plan T
 	limited := io.LimitReader(r, linuxBootstrapPlanMaxBytes+1)
 	data, err := io.ReadAll(limited)
 	if err != nil {
-		return linuxBootstrapPlan{}, fmt.Errorf("read Linux bootstrap plan: %w", err)
+		return plan, fmt.Errorf("read %s: %w", label, err)
 	}
 	if len(data) > linuxBootstrapPlanMaxBytes {
-		return linuxBootstrapPlan{}, fmt.Errorf(
-			"Linux bootstrap plan exceeds %d bytes",
+		return plan, fmt.Errorf(
+			"%s exceeds %d bytes",
+			label,
 			linuxBootstrapPlanMaxBytes,
 		)
 	}
 
-	var plan linuxBootstrapPlan
 	decoder := json.NewDecoder(bytes.NewReader(data))
 	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(&plan); err != nil {
-		return linuxBootstrapPlan{}, fmt.Errorf("decode Linux bootstrap plan: %w", err)
+		return plan, fmt.Errorf("decode %s: %w", label, err)
 	}
-	if err := ensureLinuxBootstrapPlanEOF(decoder); err != nil {
-		return linuxBootstrapPlan{}, err
+	if err := ensureLinuxBootstrapPlanEOF(decoder, label); err != nil {
+		return plan, err
 	}
 	if err := plan.validate(); err != nil {
-		return linuxBootstrapPlan{}, err
+		return plan, err
 	}
 	return plan, nil
 }
 
-func decodeLinuxBootstrapBridgePlan(r io.Reader) (linuxBootstrapBridgePlan, error) {
-	limited := io.LimitReader(r, linuxBootstrapPlanMaxBytes+1)
-	data, err := io.ReadAll(limited)
-	if err != nil {
-		return linuxBootstrapBridgePlan{}, fmt.Errorf("read Linux bootstrap bridge plan: %w", err)
-	}
-	if len(data) > linuxBootstrapPlanMaxBytes {
-		return linuxBootstrapBridgePlan{}, fmt.Errorf(
-			"Linux bootstrap bridge plan exceeds %d bytes",
-			linuxBootstrapPlanMaxBytes,
-		)
-	}
-
-	var plan linuxBootstrapBridgePlan
-	decoder := json.NewDecoder(bytes.NewReader(data))
-	decoder.DisallowUnknownFields()
-	if err := decoder.Decode(&plan); err != nil {
-		return linuxBootstrapBridgePlan{}, fmt.Errorf("decode Linux bootstrap bridge plan: %w", err)
-	}
-	if err := ensureLinuxBootstrapPlanEOF(decoder); err != nil {
-		return linuxBootstrapBridgePlan{}, err
-	}
-	if err := plan.validate(); err != nil {
-		return linuxBootstrapBridgePlan{}, err
-	}
-	return plan, nil
-}
-
-func ensureLinuxBootstrapPlanEOF(decoder *json.Decoder) error {
+func ensureLinuxBootstrapPlanEOF(decoder *json.Decoder, label string) error {
 	var trailing json.RawMessage
 	err := decoder.Decode(&trailing)
 	if err == io.EOF {
 		return nil
 	}
 	if err != nil {
-		return fmt.Errorf("decode trailing Linux bootstrap plan data: %w", err)
+		return fmt.Errorf("decode trailing %s data: %w", label, err)
 	}
-	return fmt.Errorf("Linux bootstrap plan contains trailing JSON")
+	return fmt.Errorf("%s contains trailing JSON", label)
 }
 
 func (plan linuxBootstrapPlan) validate() error {
@@ -285,17 +289,8 @@ func (plan linuxBootstrapPlan) validate() error {
 			linuxBootstrapPlanVersion,
 		)
 	}
-	if len(plan.Bridges) > linuxBootstrapPlanMaxBridges {
-		return fmt.Errorf(
-			"Linux bootstrap plan contains %d bridges; maximum is %d",
-			len(plan.Bridges),
-			linuxBootstrapPlanMaxBridges,
-		)
-	}
-	for i, bridge := range plan.Bridges {
-		if err := bridge.validate(); err != nil {
-			return fmt.Errorf("invalid Linux bootstrap bridge %d: %w", i, err)
-		}
+	if err := validateLinuxBootstrapBridgeSpecs(plan.Bridges, "Linux bootstrap plan"); err != nil {
+		return err
 	}
 	for key, value := range plan.Runtime.Set {
 		if key == "" || strings.ContainsAny(key, "=\x00") {
@@ -327,23 +322,44 @@ func (plan linuxBootstrapBridgePlan) validate() error {
 	if len(plan.Bridges) == 0 && len(plan.CleanupPaths) == 0 {
 		return fmt.Errorf("Linux bootstrap bridge plan contains no work")
 	}
-	if len(plan.Bridges) > linuxBootstrapPlanMaxBridges {
-		return fmt.Errorf(
-			"Linux bootstrap bridge plan contains %d bridges; maximum is %d",
-			len(plan.Bridges),
-			linuxBootstrapPlanMaxBridges,
-		)
-	}
-	for i, bridge := range plan.Bridges {
-		if err := bridge.validate(); err != nil {
-			return fmt.Errorf("invalid Linux bootstrap bridge %d: %w", i, err)
-		}
+	if err := validateLinuxBootstrapBridgeSpecs(plan.Bridges, "Linux bootstrap bridge plan"); err != nil {
+		return err
 	}
 	for _, path := range plan.CleanupPaths {
 		cleaned := filepath.Clean(path)
 		if filepath.Dir(cleaned) != "/tmp" || !strings.HasPrefix(filepath.Base(cleaned), "fence-runtime-") {
 			return fmt.Errorf("invalid Linux bootstrap cleanup path %q", path)
 		}
+	}
+	return nil
+}
+
+func validateLinuxBootstrapBridgeSpecs(bridges []linuxBootstrapBridgeSpec, label string) error {
+	if len(bridges) > linuxBootstrapPlanMaxBridges {
+		return fmt.Errorf(
+			"%s contains %d bridges; maximum is %d",
+			label,
+			len(bridges),
+			linuxBootstrapPlanMaxBridges,
+		)
+	}
+	listeners := make(map[string]int, len(bridges))
+	for i, bridge := range bridges {
+		if err := bridge.validate(); err != nil {
+			return fmt.Errorf("invalid Linux bootstrap bridge %d: %w", i, err)
+		}
+		key := bridge.ListenNetwork + "\x00" + bridge.ListenAddress
+		if previous, exists := listeners[key]; exists {
+			return fmt.Errorf(
+				"%s bridges %d and %d both listen on %s %s",
+				label,
+				previous,
+				i,
+				bridge.ListenNetwork,
+				bridge.ListenAddress,
+			)
+		}
+		listeners[key] = i
 	}
 	return nil
 }

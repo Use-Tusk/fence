@@ -25,6 +25,8 @@ import (
 type LinuxBridge struct {
 	HTTPSocketPath  string
 	SOCKSSocketPath string
+	HTTPProxyPort   int
+	SOCKSProxyPort  int
 	httpProcess     *exec.Cmd
 	socksProcess    *exec.Cmd
 	debug           bool
@@ -277,6 +279,8 @@ func NewLinuxBridge(httpProxyPort, socksProxyPort int, debug bool) (*LinuxBridge
 	bridge := &LinuxBridge{
 		HTTPSocketPath:  httpSocketPath,
 		SOCKSSocketPath: socksSocketPath,
+		HTTPProxyPort:   httpProxyPort,
+		SOCKSProxyPort:  socksProxyPort,
 		debug:           debug,
 	}
 
@@ -322,6 +326,14 @@ func NewLinuxBridge(httpProxyPort, socksProxyPort int, debug bool) (*LinuxBridge
 
 	bridge.Cleanup()
 	return nil, fmt.Errorf("timeout waiting for bridge sockets to be created")
+}
+
+func newDirectLinuxBridge(httpProxyPort, socksProxyPort int, debug bool) *LinuxBridge {
+	return &LinuxBridge{
+		HTTPProxyPort:  httpProxyPort,
+		SOCKSProxyPort: socksProxyPort,
+		debug:          debug,
+	}
 }
 
 // Cleanup stops the bridge processes and removes socket files.
@@ -611,6 +623,15 @@ func resolvePathForMount(path string) (string, bool) {
 	// Fall back for non-symlink paths where EvalSymlinks can fail due to
 	// transient lookup errors.
 	return path, true
+}
+
+func linuxDedicatedWritableMount(path string) bool {
+	switch filepath.Clean(path) {
+	case "/tmp", "/private/tmp":
+		return true
+	default:
+		return false
+	}
 }
 
 // sameDevice returns true if both paths reside on the same filesystem (device).
@@ -1125,13 +1146,16 @@ func WrapCommandLinuxWithOptions(cfg *config.Config, command string, bridge *Lin
 	if cfg != nil && cfg.Filesystem.AllowWrite != nil {
 		expandedPaths := ExpandGlobPatterns(cfg.Filesystem.AllowWrite)
 		for _, p := range expandedPaths {
+			if linuxDedicatedWritableMount(p) {
+				continue
+			}
 			writablePaths[p] = true
 		}
 
 		// Add non-glob paths
 		for _, p := range cfg.Filesystem.AllowWrite {
 			normalized := NormalizePath(p)
-			if !ContainsGlobChars(normalized) {
+			if !ContainsGlobChars(normalized) && !linuxDedicatedWritableMount(normalized) {
 				writablePaths[normalized] = true
 			}
 		}
@@ -1182,11 +1206,17 @@ func WrapCommandLinuxWithOptions(cfg *config.Config, command string, bridge *Lin
 		for _, p := range cfg.Filesystem.AllowWrite {
 			if !ContainsGlobChars(p) {
 				np := NormalizePath(p)
+				if linuxDedicatedWritableMount(np) {
+					continue
+				}
 				crossMountPaths = append(crossMountPaths, np)
 				crossMountWritable[np] = true
 			}
 		}
 		for _, p := range ExpandGlobPatterns(cfg.Filesystem.AllowWrite) {
+			if linuxDedicatedWritableMount(p) {
+				continue
+			}
 			crossMountPaths = append(crossMountPaths, p)
 			crossMountWritable[p] = true
 		}
@@ -1287,7 +1317,7 @@ func WrapCommandLinuxWithOptions(cfg *config.Config, command string, bridge *Lin
 	}
 
 	// Bind the outbound Unix sockets into the sandbox (need to be writable)
-	if bridge != nil {
+	if bridge != nil && bridge.HTTPSocketPath != "" && bridge.SOCKSSocketPath != "" {
 		bwrapArgs = append(
 			bwrapArgs,
 			"--bind", bridge.HTTPSocketPath, bridge.HTTPSocketPath,
@@ -1351,7 +1381,7 @@ func WrapCommandLinuxWithOptions(cfg *config.Config, command string, bridge *Lin
 
 	if opts.Debug {
 		var featureList []string
-		if features.CanUnshareNet {
+		if features.CanUnshareNet && !hasWildcardAllow {
 			featureList = append(featureList, "bwrap(network,pid,fs)")
 		} else {
 			featureList = append(featureList, "bwrap(pid,fs)")

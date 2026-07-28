@@ -14,9 +14,7 @@ type linuxBootstrapRuntimeEnvResult struct {
 }
 
 func (result linuxBootstrapRuntimeEnvResult) Cleanup() {
-	for _, path := range result.cleanupPaths {
-		_ = os.RemoveAll(path)
-	}
+	cleanupLinuxBootstrapPaths(result.cleanupPaths)
 }
 
 func applyLinuxBootstrapRuntimeEnv(plan linuxBootstrapRuntimeEnvPlan, tempRoot string) (linuxBootstrapRuntimeEnvResult, error) {
