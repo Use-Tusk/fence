@@ -17,6 +17,12 @@ const (
 	linuxLateMountReadOnly linuxLateMountKind = iota
 	linuxLateMountMaskFile
 	linuxLateMountMaskDir
+	// linuxLateMountReadOnlyExempt is a read-only bind that survives a masked
+	// ancestor directory. Masking a dangerous directory is a write protection
+	// for the directory itself; it must not silently revoke reads the policy
+	// explicitly granted inside it. Callers are responsible for only exempting
+	// paths denyRead does not cover.
+	linuxLateMountReadOnlyExempt
 )
 
 type linuxLateMount struct {
@@ -38,7 +44,7 @@ func (p *linuxLateMountPlanner) Add(path string, kind linuxLateMountKind) {
 		return
 	}
 
-	if p.hasStrictAncestor(path, linuxLateMountMaskDir) {
+	if kind != linuxLateMountReadOnlyExempt && p.hasStrictAncestor(path, linuxLateMountMaskDir) {
 		return
 	}
 
@@ -54,7 +60,7 @@ func (p *linuxLateMountPlanner) Add(path string, kind linuxLateMountKind) {
 		switch kind {
 		case linuxLateMountMaskDir:
 			p.removeDescendants(path, func(mount linuxLateMount) bool {
-				return true
+				return mount.Kind != linuxLateMountReadOnlyExempt
 			})
 		case linuxLateMountReadOnly:
 			p.removeDescendants(path, func(mount linuxLateMount) bool {
@@ -71,7 +77,7 @@ func (p *linuxLateMountPlanner) Add(path string, kind linuxLateMountKind) {
 	switch kind {
 	case linuxLateMountMaskDir:
 		p.removeDescendants(path, func(mount linuxLateMount) bool {
-			return true
+			return mount.Kind != linuxLateMountReadOnlyExempt
 		})
 	case linuxLateMountReadOnly:
 		p.removeDescendants(path, func(mount linuxLateMount) bool {
@@ -125,7 +131,7 @@ func appendLinuxLateMounts(args []string, mounts []linuxLateMount) []string {
 			args = append(args, "--tmpfs", mount.Path)
 		case linuxLateMountMaskFile:
 			args = append(args, "--ro-bind", "/dev/null", mount.Path)
-		case linuxLateMountReadOnly:
+		case linuxLateMountReadOnly, linuxLateMountReadOnlyExempt:
 			args = append(args, "--ro-bind", mount.Path, mount.Path)
 		}
 	}
@@ -138,7 +144,7 @@ func linuxLateMountPriority(kind linuxLateMountKind) int {
 		return 3
 	case linuxLateMountMaskFile:
 		return 2
-	case linuxLateMountReadOnly:
+	case linuxLateMountReadOnly, linuxLateMountReadOnlyExempt:
 		return 1
 	default:
 		return 0
@@ -226,6 +232,14 @@ func appendLinuxLatePolicyMounts(
 		if defaultDenyRead && !readableUnderPolicy(cfg, path, mountPath) {
 			if isDirectory(mountPath) {
 				planner.Add(mountPath, linuxLateMountMaskDir)
+				// The mask hides the whole subtree, including binds emitted
+				// earlier for allowRead rules that only name files *inside* the
+				// directory. Re-mount those on top of the tmpfs so the grant
+				// survives; everything else in the directory stays hidden, and
+				// the read-only bind keeps it unwritable.
+				for _, grantPath := range explicitlyReadableDescendants(cfg, mountPath) {
+					planner.Add(grantPath, linuxLateMountReadOnlyExempt)
+				}
 			} else {
 				planner.Add(mountPath, linuxLateMountMaskFile)
 			}
@@ -252,6 +266,47 @@ func appendLinuxLatePolicyMounts(
 	}
 
 	return appendLinuxLateMounts(bwrapArgs, planner.Mounts())
+}
+
+// explicitlyReadableDescendants returns the resolved paths strictly under dir
+// that the config explicitly grants read access to (allowWrite grants read, so
+// it counts here too).
+//
+// denyRead is re-checked per path rather than relying on the planner's masked
+// ancestor rule: exempt mounts deliberately punch through a masked directory,
+// so a denied path must be filtered out here or the mask would leak.
+func explicitlyReadableDescendants(cfg *config.Config, dir string) []string {
+	if cfg == nil {
+		return nil
+	}
+
+	patterns := slices.Concat(
+		cfg.Filesystem.AllowRead,
+		cfg.Filesystem.AllowExecute,
+		cfg.Filesystem.AllowWrite,
+	)
+
+	var paths []string
+	seen := make(map[string]bool)
+	for _, path := range ExpandGlobPatterns(patterns) {
+		mountPath, ok := resolvePathForMount(path)
+		if !ok {
+			continue
+		}
+		mountPath = filepath.Clean(mountPath)
+		if mountPath == dir || !linuxPathContains(dir, mountPath) || seen[mountPath] {
+			continue
+		}
+		if _, denied := matchPathRule(path, cfg.Filesystem.DenyRead); denied {
+			continue
+		}
+		if _, denied := matchPathRule(mountPath, cfg.Filesystem.DenyRead); denied {
+			continue
+		}
+		seen[mountPath] = true
+		paths = append(paths, mountPath)
+	}
+	return paths
 }
 
 // readableUnderPolicy reports whether the config explicitly grants read access

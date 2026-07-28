@@ -926,3 +926,112 @@ func TestWrapCommandLinuxWithOptions_DefaultDenyReadDenyReadWinsOverAllowedDange
 		t.Fatalf("denyRead mask was overridden by a later readable rebind: %s", cmd)
 	}
 }
+
+// A dangerous directory stays masked, but an explicitly granted file inside it
+// must still be readable: the mask hides the whole subtree, so the grant has to
+// be re-mounted on top of the tmpfs.
+func TestWrapCommandLinuxWithOptions_DefaultDenyReadKeepsAllowedFileInsideDangerousDir(t *testing.T) {
+	if _, err := exec.LookPath("bwrap"); err != nil {
+		t.Skip("bwrap not available")
+	}
+
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	cwd := t.TempDir()
+	t.Chdir(cwd)
+
+	vscode := filepath.Join(cwd, ".vscode")
+	if err := os.MkdirAll(vscode, 0o755); err != nil {
+		t.Fatalf("failed to create .vscode dir: %v", err)
+	}
+	settings := filepath.Join(vscode, "settings.json")
+	if err := os.WriteFile(settings, []byte("{}"), 0o644); err != nil {
+		t.Fatalf("failed to create settings.json: %v", err)
+	}
+	secret := filepath.Join(vscode, "secret.json")
+	if err := os.WriteFile(secret, []byte("{}"), 0o644); err != nil {
+		t.Fatalf("failed to create secret.json: %v", err)
+	}
+
+	cfg := &config.Config{
+		Filesystem: config.FilesystemConfig{
+			DefaultDenyRead: true,
+			AllowRead:       []string{settings},
+		},
+	}
+
+	cmd, err := WrapCommandLinuxWithOptions(cfg, "echo ok", nil, nil, LinuxSandboxOptions{
+		UseLandlock: false,
+		UseSeccomp:  false,
+		UseEBPF:     false,
+		ShellMode:   ShellModeDefault,
+	})
+	if err != nil {
+		t.Fatalf("WrapCommandLinuxWithOptions failed: %v", err)
+	}
+
+	mask := strings.LastIndex(cmd, ShellQuote([]string{"--tmpfs", vscode}))
+	if mask < 0 {
+		t.Fatalf("expected dangerous directory to stay masked: %s", cmd)
+	}
+	bind := strings.LastIndex(cmd, ShellQuote([]string{"--ro-bind", settings, settings}))
+	if bind < 0 {
+		t.Fatalf("expected allowRead file inside dangerous dir to be bound: %s", cmd)
+	}
+	if bind < mask {
+		t.Fatalf("allowRead bind inside dangerous dir is shadowed by the later mask: %s", cmd)
+	}
+	if strings.Contains(cmd, ShellQuote([]string{"--ro-bind", secret, secret})) {
+		t.Fatalf("non-granted file inside dangerous dir was exposed: %s", cmd)
+	}
+}
+
+// The exemption must not become a hole in denyRead: a denied directory stays
+// fully masked even when allowRead names a file inside it.
+func TestWrapCommandLinuxWithOptions_DefaultDenyReadDenyReadWinsOverFileInsideDangerousDir(t *testing.T) {
+	if _, err := exec.LookPath("bwrap"); err != nil {
+		t.Skip("bwrap not available")
+	}
+
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	cwd := t.TempDir()
+	t.Chdir(cwd)
+
+	vscode := filepath.Join(cwd, ".vscode")
+	if err := os.MkdirAll(vscode, 0o755); err != nil {
+		t.Fatalf("failed to create .vscode dir: %v", err)
+	}
+	settings := filepath.Join(vscode, "settings.json")
+	if err := os.WriteFile(settings, []byte("{}"), 0o644); err != nil {
+		t.Fatalf("failed to create settings.json: %v", err)
+	}
+
+	cfg := &config.Config{
+		Filesystem: config.FilesystemConfig{
+			DefaultDenyRead: true,
+			AllowRead:       []string{settings},
+			DenyRead:        []string{vscode},
+		},
+	}
+
+	cmd, err := WrapCommandLinuxWithOptions(cfg, "echo ok", nil, nil, LinuxSandboxOptions{
+		UseLandlock: false,
+		UseSeccomp:  false,
+		UseEBPF:     false,
+		ShellMode:   ShellModeDefault,
+	})
+	if err != nil {
+		t.Fatalf("WrapCommandLinuxWithOptions failed: %v", err)
+	}
+
+	mask := strings.LastIndex(cmd, ShellQuote([]string{"--tmpfs", vscode}))
+	if mask < 0 {
+		t.Fatalf("expected denyRead directory to be masked: %s", cmd)
+	}
+	if bind := strings.LastIndex(cmd, ShellQuote([]string{"--ro-bind", settings, settings})); bind > mask {
+		t.Fatalf("denyRead mask was punctured by an exempt rebind: %s", cmd)
+	}
+}
