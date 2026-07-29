@@ -1060,7 +1060,12 @@ func bootstrapPIDVars(bridge *LinuxBridge, reverseBridge *ReverseBridge, localOu
 	}
 	if localOutboundBridge != nil {
 		for _, port := range localOutboundBridge.Ports {
-			pidVars = append(pidVars, fmt.Sprintf("LO_%d_PID", port), fmt.Sprintf("LO6_%d_PID", port))
+			// Only the IPv4 leg gates readiness. The IPv6 leg
+			// (LO6_%d_PID) is best-effort: on IPv6-disabled systems its
+			// TCP6-LISTEN,bind=::1 socat exits immediately, and requiring
+			// it to stay alive would abort bootstrap for everyone instead
+			// of just falling back to IPv4-only localhost bridging.
+			pidVars = append(pidVars, fmt.Sprintf("LO_%d_PID", port))
 		}
 	}
 	return pidVars
