@@ -156,7 +156,7 @@ See [templates.md](templates.md) for available templates.
 | `allowAllUnixSockets` | Allow all Unix sockets |
 | `allowLocalBinding` | Allow binding to local ports |
 | `allowLocalOutbound` | Allow outbound connections to localhost, e.g., local DBs (defaults to `allowLocalBinding` if not set). **Linux** also requires `allowLocalOutboundPorts` to list which host loopback ports to bridge. |
-| `allowLocalOutboundPorts` | **Linux only.** TCP ports on the host's `127.0.0.1` that the sandbox may reach when `allowLocalOutbound` is true (e.g. `[5432, 6379]`). Each listed port is forwarded from sandbox loopback to host loopback via an internal socat bridge. Ignored on macOS, which allows any localhost port when `allowLocalOutbound` is true. |
+| `allowLocalOutboundPorts` | **Linux only.** TCP ports on the host's loopback (`127.0.0.1` and `::1`) that the sandbox may reach when `allowLocalOutbound` is true (e.g. `[5432, 6379]`). Each listed port is forwarded from sandbox loopback to host loopback via an internal socat bridge, on both IPv4 and IPv6. Ignored on macOS, which allows any localhost port when `allowLocalOutbound` is true. |
 | `httpProxyPort` | Fixed port for HTTP proxy (default: random available port) |
 | `socksProxyPort` | Fixed port for SOCKS5 proxy (default: random available port) |
 | `upstreamProxy` | Optional upstream HTTP proxy URL (e.g. `http://127.0.0.1:8080`). Used with `defaultAction: "proxy"` to forward grey-zone traffic for inspection. Only `http://` scheme is supported. See [Upstream Proxy / mitmproxy](#upstream-proxy--mitmproxy). |

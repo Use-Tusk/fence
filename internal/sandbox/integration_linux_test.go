@@ -865,6 +865,52 @@ func TestLinux_AllowLocalOutboundReachesHost(t *testing.T) {
 	}
 }
 
+// TestLinux_AllowLocalOutboundReachesIPv6OnlyHost verifies that the bridge
+// also reaches host services that bind only the IPv6 loopback ([::1]), not
+// 127.0.0.1. This is the common case for Node/Vite dev servers, which
+// resolve "localhost" and can end up IPv6-only depending on DNS ordering.
+func TestLinux_AllowLocalOutboundReachesIPv6OnlyHost(t *testing.T) {
+	skipIfAlreadySandboxed(t)
+	skipIfCommandNotFound(t, "curl")
+
+	features := DetectLinuxFeatures()
+	if !features.CanUnshareNet {
+		t.Skip("skipping: localhost-outbound bridge requires network namespace support")
+	}
+
+	const markerBody = "localhost-outbound bridge reached the IPv6-only host"
+	mux := http.NewServeMux()
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(markerBody))
+	})
+	server := &http.Server{Handler: mux, ReadHeaderTimeout: 2 * time.Second}
+	listener, err := net.Listen("tcp6", "[::1]:0")
+	if err != nil {
+		t.Skipf("skipping: host cannot bind IPv6 loopback: %v", err)
+	}
+	port := listener.Addr().(*net.TCPAddr).Port
+	go func() { _ = server.Serve(listener) }()
+	defer func() { _ = server.Close() }()
+
+	workspace := createTempWorkspace(t)
+	cfg := testConfigWithWorkspace(workspace)
+	trueVal := true
+	cfg.Network.AllowLocalOutbound = &trueVal
+	cfg.Network.AllowLocalOutboundPorts = []int{port}
+
+	url := "http://[::1]:" + strconv.Itoa(port) + "/"
+	result := runUnderSandboxWithTimeout(t, cfg, "curl -sS --max-time 5 "+url, workspace, 15*time.Second)
+
+	if result.Failed() {
+		t.Fatalf("expected curl to succeed reaching IPv6-only host loopback via bridge; exit=%d\nstdout: %s\nstderr: %s",
+			result.ExitCode, result.Stdout, result.Stderr)
+	}
+	if !strings.Contains(result.Stdout, markerBody) {
+		t.Fatalf("expected response body %q; got stdout=%q stderr=%q",
+			markerBody, result.Stdout, result.Stderr)
+	}
+}
+
 // TestLinux_AllowLocalOutboundWithoutPortsBlocked verifies the negative case:
 // setting allowLocalOutbound=true but leaving allowLocalOutboundPorts empty
 // does NOT grant access (since Linux needs explicit ports to bridge). This

@@ -196,7 +196,7 @@
           ]
         },
         "allowLocalOutboundPorts": {
-          "description": "Linux-only. TCP ports on the host's 127.0.0.1 that the sandbox may connect to when allowLocalOutbound is true. Each listed port is forwarded from sandbox loopback to host loopback via a per-port bridge. Ignored on macOS (which allows arbitrary localhost ports when allowLocalOutbound is true).",
+          "description": "Linux-only. TCP ports on the host's loopback (127.0.0.1 and ::1) that the sandbox may connect to when allowLocalOutbound is true. Each listed port is forwarded from sandbox loopback to host loopback via a per-port bridge, on both IPv4 and IPv6. Ignored on macOS (which allows arbitrary localhost ports when allowLocalOutbound is true).",
           "items": {
             "type": "integer"
           },
