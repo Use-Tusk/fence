@@ -409,6 +409,22 @@ func TestEffectiveLinuxForceNewSession(t *testing.T) {
 	})
 }
 
+func TestBootstrapPIDVars_LocalOutboundIPv6LegIsBestEffort(t *testing.T) {
+	localOutboundBridge := &LocalOutboundBridge{Ports: []int{5432, 6379}}
+
+	pidVars := bootstrapPIDVars(nil, nil, localOutboundBridge)
+
+	want := []string{"LO_5432_PID", "LO_6379_PID"}
+	if !slices.Equal(pidVars, want) {
+		t.Fatalf("bootstrapPIDVars() = %v, want %v", pidVars, want)
+	}
+	for _, v := range pidVars {
+		if strings.HasPrefix(v, "LO6_") {
+			t.Fatalf("bootstrapPIDVars() must not require the IPv6 leg to stay alive, got %v", pidVars)
+		}
+	}
+}
+
 func TestWrapCommandLinuxWithOptions_UsesMinimalDevMode(t *testing.T) {
 	if _, err := exec.LookPath("bwrap"); err != nil {
 		t.Skip("bwrap not available")

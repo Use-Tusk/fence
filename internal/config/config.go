@@ -50,8 +50,9 @@ type NetworkConfig struct {
 	// AllowLocalOutboundPorts is required on Linux for host-loopback access.
 	// macOS reaches any localhost port when allowLocalOutbound is true; Linux
 	// keeps --unshare-net so the sandbox's loopback is isolated from the
-	// host's, and each listed port is bridged back to host 127.0.0.1:<port>.
-	AllowLocalOutboundPorts []int             `json:"allowLocalOutboundPorts,omitempty" description:"Linux-only. TCP ports on the host's 127.0.0.1 that the sandbox may connect to when allowLocalOutbound is true. Each listed port is forwarded from sandbox loopback to host loopback via a per-port bridge. Ignored on macOS (which allows arbitrary localhost ports when allowLocalOutbound is true)."`
+	// host's, and each listed port is bridged back to both host 127.0.0.1:<port>
+	// and host [::1]:<port> (some dev servers, e.g. Node/Vite, bind IPv6-only).
+	AllowLocalOutboundPorts []int             `json:"allowLocalOutboundPorts,omitempty" description:"Linux-only. TCP ports on the host's loopback (127.0.0.1 and ::1) that the sandbox may connect to when allowLocalOutbound is true. Each listed port is forwarded from sandbox loopback to host loopback via a per-port bridge, on both IPv4 and IPv6. Ignored on macOS (which allows arbitrary localhost ports when allowLocalOutbound is true)."`
 	HTTPProxyPort           int               `json:"httpProxyPort,omitempty" description:"Port for the internal HTTP proxy used to enforce domain filtering. Set automatically by fence; only override for advanced configurations."`
 	SOCKSProxyPort          int               `json:"socksProxyPort,omitempty" description:"Port for the internal SOCKS proxy used to enforce domain filtering. Set automatically by fence; only override for advanced configurations."`
 	UpstreamProxy           string            `json:"upstreamProxy,omitempty" description:"Optional upstream HTTP proxy URL (e.g. http://127.0.0.1:8080). When set, grey-zone traffic (not matched by allowedDomains, not hard-blocked by deniedDomains) is forwarded to this proxy instead of being denied. Intended for use with tools like mitmproxy for interactive inspection."`
