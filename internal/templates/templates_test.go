@@ -117,6 +117,19 @@ func TestCodeTemplate(t *testing.T) {
 		t.Error("*.anthropic.com should be in allowed domains")
 	}
 
+	for _, domain := range []string{"api.minimax.io", "api.minimaxi.com"} {
+		found := false
+		for _, allowedDomain := range cfg.Network.AllowedDomains {
+			if allowedDomain == domain {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Errorf("%s should be in allowed domains", domain)
+		}
+	}
+
 	// Check that cloud metadata domains are denied
 	if len(cfg.Network.DeniedDomains) == 0 {
 		t.Error("code template should have denied domains")
