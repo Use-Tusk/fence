@@ -637,6 +637,47 @@ func TestLinux_DefaultDenyReadKeepsAllowedDangerousSymlinkReadOnly(t *testing.T)
 	}
 }
 
+func TestLinux_DefaultDenyReadKeepsDangerousFileUnderSymlinkedHomeReadable(t *testing.T) {
+	skipIfAlreadySandboxed(t)
+
+	workspace := createTempWorkspace(t)
+	homeRoot := createTempWorkspace(t)
+	realHomeRoot := filepath.Join(homeRoot, "real-home")
+	realHome := filepath.Join(realHomeRoot, "user")
+	if err := os.MkdirAll(realHome, 0o700); err != nil {
+		t.Fatalf("failed to create real home: %v", err)
+	}
+	homeLink := filepath.Join(homeRoot, "home-link")
+	if err := os.Symlink(realHomeRoot, homeLink); err != nil {
+		t.Fatalf("failed to create home symlink: %v", err)
+	}
+	lexicalHome := filepath.Join(homeLink, "user")
+	t.Setenv("HOME", lexicalHome)
+
+	const original = "export SAFE=1\n"
+	targetPath := createTestFile(t, realHome, ".zshrc", original)
+	zshrcPath := filepath.Join(lexicalHome, ".zshrc")
+
+	cfg := testConfigWithWorkspace(workspace)
+	cfg.Filesystem.DefaultDenyRead = true
+	cfg.Filesystem.AllowRead = append(cfg.Filesystem.AllowRead, "~/.zshrc")
+
+	readResult := runUnderSandbox(t, cfg, "cat "+zshrcPath, workspace)
+	assertAllowed(t, readResult)
+	assertContains(t, readResult.Stdout, "export SAFE=1")
+
+	writeResult := runUnderSandbox(t, cfg, "printf malicious >> "+zshrcPath, workspace)
+	assertBlocked(t, writeResult)
+
+	content, err := os.ReadFile(targetPath) //nolint:gosec // test-owned path
+	if err != nil {
+		t.Fatalf("failed to read zshrc after blocked write: %v", err)
+	}
+	if string(content) != original {
+		t.Fatalf("dangerous file changed despite write protection: got %q", content)
+	}
+}
+
 // TestLinux_DenyReadTakesPrecedenceOverMandatoryDangerousPath verifies explicit
 // denyRead rules always win over mandatory dangerous-path write protection.
 func TestLinux_DenyReadTakesPrecedenceOverMandatoryDangerousPath(t *testing.T) {

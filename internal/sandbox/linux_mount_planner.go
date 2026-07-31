@@ -273,6 +273,12 @@ func appendLinuxLatePolicyMounts(
 		if !ok {
 			continue
 		}
+		// Device and proc exposure is controlled by their dedicated mounts.
+		// Do not let a dangerous symlink create a second path to those sources
+		// or plan a redundant self-bind against the synthetic mount.
+		if isLinuxSpecialReadSource(mountPath) {
+			continue
+		}
 		readable := hasExplicitLinuxReadGrant(cfg, path, mountPath)
 		if defaultDenyRead && !readable {
 			if isDirectory(mountPath) {
@@ -283,14 +289,13 @@ func appendLinuxLatePolicyMounts(
 			continue
 		}
 
-		// NormalizePath resolves a final symlink, so the earlier allowRead bind
-		// exposes only its target. Under defaultDenyRead the lexical name is
-		// otherwise absent because the containing directory is not mounted.
-		// Re-expose only mandatory dangerous symlinks, read-only, and never use
-		// this alias to surface special files or bypass a runtime exec deny.
-		if defaultDenyRead && readable && isSymlink(path) &&
+		// NormalizePath resolves symlinks in any path component, so the earlier
+		// allowRead bind exposes only the canonical target. Under
+		// defaultDenyRead the lexical name is otherwise absent because its
+		// containing directory is not mounted. Restore mandatory dangerous
+		// aliases read-only without bypassing a runtime exec deny.
+		if defaultDenyRead && readable &&
 			filepath.Clean(path) != filepath.Clean(mountPath) &&
-			!isLinuxSpecialReadSource(mountPath) &&
 			!isLinuxRuntimeDeniedSource(mountPath, deniedExecPaths) {
 			bwrapArgs = append(bwrapArgs, "--ro-bind", mountPath, filepath.Clean(path))
 		}

@@ -833,6 +833,43 @@ func TestAppendLinuxLatePolicyMounts_DefaultDenyReadDangerousSymlinkAlias(t *tes
 	}
 }
 
+func TestAppendLinuxLatePolicyMounts_DefaultDenyReadSymlinkedHomeAncestor(t *testing.T) {
+	root := t.TempDir()
+	realHomeRoot := filepath.Join(root, "real-home")
+	realHome := filepath.Join(realHomeRoot, "user")
+	if err := os.MkdirAll(realHome, 0o700); err != nil {
+		t.Fatalf("failed to create real home: %v", err)
+	}
+	homeLink := filepath.Join(root, "home-link")
+	if err := os.Symlink(realHomeRoot, homeLink); err != nil {
+		t.Fatalf("failed to create home symlink: %v", err)
+	}
+	lexicalHome := filepath.Join(homeLink, "user")
+	t.Setenv("HOME", lexicalHome)
+	cwd := t.TempDir()
+
+	target := filepath.Join(realHome, ".zshrc")
+	if err := os.WriteFile(target, []byte("export SAFE=1\n"), 0o600); err != nil {
+		t.Fatalf("failed to create zshrc: %v", err)
+	}
+	lexicalPath := filepath.Join(lexicalHome, ".zshrc")
+
+	cfg := &config.Config{
+		Filesystem: config.FilesystemConfig{
+			DefaultDenyRead: true,
+			AllowRead:       []string{"~/.zshrc"},
+		},
+	}
+	args := appendLinuxLatePolicyMounts(nil, cfg, cwd, true, nil, false)
+
+	if !linuxArgsContain(args, []string{"--ro-bind", target, lexicalPath}) {
+		t.Fatalf("expected read-only alias bind from %q to %q; args=%q", target, lexicalPath, args)
+	}
+	if !linuxArgsContain(args, []string{"--ro-bind", target, target}) {
+		t.Fatalf("expected canonical target to remain read-only; args=%q", args)
+	}
+}
+
 func TestAppendLinuxLatePolicyMounts_DoesNotAliasRestrictedSources(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
@@ -842,8 +879,10 @@ func TestAppendLinuxLatePolicyMounts_DoesNotAliasRestrictedSources(t *testing.T)
 		name            string
 		target          string
 		deniedExecPaths []string
+		specialSource   bool
 	}{
-		{name: "proc source", target: "/proc/self/status"},
+		{name: "device source", target: "/dev/null", specialSource: true},
+		{name: "proc source", target: "/proc/self/status", specialSource: true},
 		{name: "runtime denied source", target: filepath.Join(home, "denied-tool"), deniedExecPaths: []string{filepath.Join(home, "denied-tool")}},
 	}
 
@@ -873,6 +912,9 @@ func TestAppendLinuxLatePolicyMounts_DoesNotAliasRestrictedSources(t *testing.T)
 			args := appendLinuxLatePolicyMounts(nil, cfg, cwd, true, tt.deniedExecPaths, false)
 			if linuxArgsContain(args, []string{"--ro-bind", resolved, link}) {
 				t.Fatalf("did not expect restricted source %q to be aliased; args=%q", resolved, args)
+			}
+			if tt.specialSource && linuxArgsContain(args, []string{"--ro-bind", resolved, resolved}) {
+				t.Fatalf("did not expect special source %q to be rebound; args=%q", resolved, args)
 			}
 		})
 	}

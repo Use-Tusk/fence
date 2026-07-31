@@ -294,6 +294,9 @@ Protection behavior differs by read mode:
     view hid
 
 Explicit `denyRead` still wins over this phase.
+Dedicated `/dev` and `/proc` exposure policy also takes precedence, so dangerous
+symlinks into those trees are not restored. Runtime executable denies can
+similarly mask an otherwise readable target.
 
 ### 11. `denyWrite` Read-Only Overlays
 
