@@ -870,6 +870,57 @@ func TestAppendLinuxLatePolicyMounts_DefaultDenyReadSymlinkedHomeAncestor(t *tes
 	}
 }
 
+func TestAppendLinuxLatePolicyMounts_DoesNotAliasDangerousDirectoryUnderSymlinkedAncestor(t *testing.T) {
+	root := t.TempDir()
+	realWorkspace := filepath.Join(root, "real-workspace")
+	dangerousDir := filepath.Join(realWorkspace, ".vscode")
+	if err := os.MkdirAll(dangerousDir, 0o700); err != nil {
+		t.Fatalf("failed to create dangerous directory: %v", err)
+	}
+	deniedFile := filepath.Join(dangerousDir, "denied")
+	if err := os.WriteFile(deniedFile, []byte("secret\n"), 0o600); err != nil {
+		t.Fatalf("failed to create denied file: %v", err)
+	}
+
+	workspaceLink := filepath.Join(root, "workspace-link")
+	if err := os.Symlink(realWorkspace, workspaceLink); err != nil {
+		t.Fatalf("failed to create workspace symlink: %v", err)
+	}
+	lexicalDangerousDir := filepath.Join(workspaceLink, ".vscode")
+
+	tests := []struct {
+		name            string
+		denyRead        []string
+		deniedExecPaths []string
+	}{
+		{name: "denyRead descendant", denyRead: []string{deniedFile}},
+		{name: "runtime denied descendant", deniedExecPaths: []string{deniedFile}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := &config.Config{
+				Filesystem: config.FilesystemConfig{
+					DefaultDenyRead: true,
+					AllowRead:       []string{lexicalDangerousDir},
+					DenyRead:        tt.denyRead,
+				},
+			}
+			args := appendLinuxLatePolicyMounts(nil, cfg, workspaceLink, true, tt.deniedExecPaths, false)
+
+			if linuxArgsContain(args, []string{"--ro-bind", dangerousDir, lexicalDangerousDir}) {
+				t.Fatalf("did not expect dangerous directory alias with masked descendants; args=%q", args)
+			}
+			if !linuxArgsContain(args, []string{"--ro-bind", dangerousDir, dangerousDir}) {
+				t.Fatalf("expected canonical dangerous directory to remain read-only; args=%q", args)
+			}
+			if !linuxArgsContain(args, []string{"--ro-bind", "/dev/null", deniedFile}) {
+				t.Fatalf("expected denied descendant to remain masked; args=%q", args)
+			}
+		})
+	}
+}
+
 func TestAppendLinuxLatePolicyMounts_DoesNotAliasRestrictedSources(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)

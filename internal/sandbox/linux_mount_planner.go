@@ -292,9 +292,12 @@ func appendLinuxLatePolicyMounts(
 		// NormalizePath resolves symlinks in any path component, so the earlier
 		// allowRead bind exposes only the canonical target. Under
 		// defaultDenyRead the lexical name is otherwise absent because its
-		// containing directory is not mounted. Restore mandatory dangerous
-		// aliases read-only without bypassing a runtime exec deny.
+		// containing directory is not mounted. Restore mandatory dangerous file
+		// aliases read-only without bypassing a runtime exec deny. Directories
+		// are excluded because canonical descendant masks would not automatically
+		// carry over to a second bind-mounted view of the subtree.
 		if defaultDenyRead && readable &&
+			!isDirectory(mountPath) &&
 			filepath.Clean(path) != filepath.Clean(mountPath) &&
 			!isLinuxRuntimeDeniedSource(mountPath, deniedExecPaths) {
 			bwrapArgs = append(bwrapArgs, "--ro-bind", mountPath, filepath.Clean(path))
