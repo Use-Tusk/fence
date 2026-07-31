@@ -14,6 +14,8 @@
       "api.together.xyz",
       "openrouter.ai",
       "api.morphllm.com",
+      "api.minimax.io",
+      "api.minimaxi.com",
       "*.amazonaws.com",
 
       // OpenCode
