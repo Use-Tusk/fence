@@ -666,6 +666,50 @@ func resolvePathForMount(path string) (string, bool) {
 	return path, true
 }
 
+type linuxCrossMountCandidate struct {
+	Path     string
+	Writable bool
+}
+
+// resolveLinuxCrossMountCandidates canonicalizes aliases before bwrap sees
+// them, merges duplicate access modes, and returns parents before descendants.
+func resolveLinuxCrossMountCandidates(paths []string, writablePaths map[string]bool) []linuxCrossMountCandidate {
+	var candidates []linuxCrossMountCandidate
+	indexByPath := make(map[string]int)
+
+	for _, path := range paths {
+		mountPath, ok := resolvePathForMount(path)
+		if !ok {
+			continue
+		}
+		mountPath = filepath.Clean(mountPath)
+
+		if index, exists := indexByPath[mountPath]; exists {
+			if writablePaths[path] {
+				candidates[index].Writable = true
+			}
+			continue
+		}
+
+		indexByPath[mountPath] = len(candidates)
+		candidates = append(candidates, linuxCrossMountCandidate{
+			Path:     mountPath,
+			Writable: writablePaths[path],
+		})
+	}
+
+	slices.SortFunc(candidates, func(a, b linuxCrossMountCandidate) int {
+		depthA := linuxLateMountDepth(a.Path)
+		depthB := linuxLateMountDepth(b.Path)
+		if depthA != depthB {
+			return depthA - depthB
+		}
+		return strings.Compare(a.Path, b.Path)
+	})
+
+	return candidates
+}
+
 func linuxDedicatedWritableMount(path string) bool {
 	return filepath.Clean(path) == "/tmp"
 }
@@ -1265,14 +1309,15 @@ func WrapCommandLinuxWithOptions(cfg *config.Config, command string, bridge *Lin
 			crossMountPaths = append(crossMountPaths, cwd)
 		}
 
-		for _, p := range crossMountPaths {
-			if !fileExists(p) || sameDevice("/", p) || crossMountBound[p] {
+		for _, candidate := range resolveLinuxCrossMountCandidates(crossMountPaths, crossMountWritable) {
+			p := candidate.Path
+			if sameDevice("/", p) || crossMountBound[p] {
 				continue
 			}
 
 			if root, ok := linuxContainingPreservedSubmountRoot(p, preservedHostSubmounts); ok {
 				crossMountBound[p] = true
-				if crossMountWritable[p] {
+				if candidate.Writable {
 					bwrapArgs = append(bwrapArgs, "--bind", p, p)
 					if opts.Debug {
 						fencelog.Printf("[fence:linux] Cross-mount writable bind under preserved submount %s: %s\n", root, p)
@@ -1308,13 +1353,13 @@ func WrapCommandLinuxWithOptions(cfg *config.Config, command string, bridge *Lin
 				}
 			}
 			if mountBoundaryFound {
-				if crossMountWritable[p] {
+				if candidate.Writable {
 					bwrapArgs = append(bwrapArgs, "--bind", p, p)
 				} else {
 					bwrapArgs = append(bwrapArgs, "--ro-bind", p, p)
 				}
 				if opts.Debug {
-					fencelog.Printf("[fence:linux] Cross-mount bind: %s (writable=%v)\n", p, crossMountWritable[p])
+					fencelog.Printf("[fence:linux] Cross-mount bind: %s (writable=%v)\n", p, candidate.Writable)
 				}
 			}
 		}
