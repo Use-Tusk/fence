@@ -446,14 +446,18 @@ flowchart TB
     HSOCAT --> SVC
 ```
 
-Flow:
+Each port gets an independent IPv4 leg (`127.0.0.1`) and IPv6 leg (`::1`),
+since some dev servers (e.g. Node/Vite, which resolves `localhost` and can end
+up IPv6-only depending on DNS ordering) bind only the IPv6 loopback.
 
-1. The sandbox Fence bridge helper binds sandbox `127.0.0.1:<port>` and
-   forwards to a shared Unix socket
+Flow (per address family):
+
+1. The sandbox Fence bridge helper binds sandbox `127.0.0.1:<port>` (or
+   `::1:<port>`) and forwards to a shared Unix socket
 2. Host `socat` listens on that Unix socket and forwards to host
-   `127.0.0.1:<port>`
-3. `NO_PROXY=localhost,127.0.0.1` continues to direct clients straight at the
-   sandbox loopback; the bridge makes that loopback resolve to the host
+   `127.0.0.1:<port>` (or `[::1]:<port>`)
+3. `NO_PROXY=localhost,127.0.0.1,::1` continues to direct clients straight at
+   the sandbox loopback; the bridge makes that loopback resolve to the host
 
 Because the bridge is explicit per port, the list in
 `allowLocalOutboundPorts` acts as a clear allowlist of host loopback services

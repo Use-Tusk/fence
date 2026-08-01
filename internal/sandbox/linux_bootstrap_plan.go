@@ -28,6 +28,7 @@ type linuxBootstrapBridgeSpec struct {
 	ListenAddress string `json:"listenAddress"`
 	TargetNetwork string `json:"targetNetwork"`
 	TargetAddress string `json:"targetAddress"`
+	Optional      bool   `json:"optional,omitempty"`
 }
 
 type linuxBootstrapRuntimeEnvPlan struct {
@@ -144,11 +145,13 @@ func buildLinuxBootstrapPlan(
 	}
 
 	if localOutboundBridge != nil {
-		if len(localOutboundBridge.Ports) != len(localOutboundBridge.SocketPaths) {
+		if len(localOutboundBridge.Ports) != len(localOutboundBridge.SocketPaths) ||
+			len(localOutboundBridge.Ports) != len(localOutboundBridge.SocketPathsV6) {
 			return linuxBootstrapPlan{}, fmt.Errorf(
-				"local-outbound bridge has %d ports and %d socket paths",
+				"local-outbound bridge has %d ports, %d IPv4 socket paths, and %d IPv6 socket paths",
 				len(localOutboundBridge.Ports),
 				len(localOutboundBridge.SocketPaths),
+				len(localOutboundBridge.SocketPathsV6),
 			)
 		}
 		for i, port := range localOutboundBridge.Ports {
@@ -163,6 +166,13 @@ func buildLinuxBootstrapPlan(
 				ListenAddress: net.JoinHostPort("127.0.0.1", strconv.Itoa(port)),
 				TargetNetwork: "unix",
 				TargetAddress: localOutboundBridge.SocketPaths[i],
+			})
+			plan.Bridges = append(plan.Bridges, linuxBootstrapBridgeSpec{
+				ListenNetwork: "tcp",
+				ListenAddress: net.JoinHostPort("::1", strconv.Itoa(port)),
+				TargetNetwork: "unix",
+				TargetAddress: localOutboundBridge.SocketPathsV6[i],
+				Optional:      true,
 			})
 		}
 	}

@@ -488,6 +488,40 @@ func TestEffectiveLinuxForceNewSession(t *testing.T) {
 	})
 }
 
+func TestLinuxBootstrapPlan_LocalOutboundIPv6LegIsBestEffort(t *testing.T) {
+	plan, err := buildLinuxBootstrapPlan(
+		&config.Config{},
+		"echo ok",
+		nil,
+		nil,
+		&LocalOutboundBridge{
+			Ports:         []int{5432},
+			SocketPaths:   []string{"/tmp/fence-local-v4.sock"},
+			SocketPathsV6: []string{"/tmp/fence-local-v6.sock"},
+		},
+		linuxBootstrapExecutables{
+			Shell: linuxBootstrapShellPath,
+			Fence: linuxBootstrapFencePath,
+		},
+		"-c",
+		false,
+		false,
+		false,
+	)
+	if err != nil {
+		t.Fatalf("buildLinuxBootstrapPlan() error = %v", err)
+	}
+	if len(plan.Bridges) != 2 {
+		t.Fatalf("bridge count = %d, want IPv4 and IPv6 legs", len(plan.Bridges))
+	}
+	if plan.Bridges[0].Optional {
+		t.Fatal("IPv4 local-outbound leg must be required")
+	}
+	if !plan.Bridges[1].Optional {
+		t.Fatal("IPv6 local-outbound leg must be optional")
+	}
+}
+
 func TestWrapCommandLinuxWithOptions_UsesMinimalDevMode(t *testing.T) {
 	if _, err := exec.LookPath("bwrap"); err != nil {
 		t.Skip("bwrap not available")
@@ -834,6 +868,254 @@ func TestLinuxLateMountPlanner_ReadOnlyAncestorPrunesChildReadOnly(t *testing.T)
 	}
 	if mounts[0].Path != "/tmp/secret" || mounts[0].Kind != linuxLateMountReadOnly {
 		t.Fatalf("expected parent read-only mount to remain, got %#v", mounts)
+	}
+}
+
+func linuxArgsContain(args, want []string) bool {
+	if len(want) == 0 || len(want) > len(args) {
+		return false
+	}
+	for i := 0; i <= len(args)-len(want); i++ {
+		if slices.Equal(args[i:i+len(want)], want) {
+			return true
+		}
+	}
+	return false
+}
+
+func TestAppendLinuxLatePolicyMounts_DefaultDenyReadDangerousFileVisibility(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	cwd := t.TempDir()
+
+	zshrc := filepath.Join(home, ".zshrc")
+	if err := os.WriteFile(zshrc, []byte("export SAFE=1\n"), 0o600); err != nil {
+		t.Fatalf("failed to create zshrc: %v", err)
+	}
+
+	tests := []struct {
+		name       string
+		filesystem config.FilesystemConfig
+		wantMask   bool
+	}{
+		{
+			name: "ungranted remains hidden",
+			filesystem: config.FilesystemConfig{
+				DefaultDenyRead: true,
+			},
+			wantMask: true,
+		},
+		{
+			name: "allowRead remains visible read-only",
+			filesystem: config.FilesystemConfig{
+				DefaultDenyRead: true,
+				AllowRead:       []string{"~/.zshrc"},
+			},
+		},
+		{
+			name: "parent allowWrite still protects dangerous file",
+			filesystem: config.FilesystemConfig{
+				DefaultDenyRead: true,
+				AllowWrite:      []string{"~"},
+			},
+		},
+		{
+			name: "denyRead wins over allowRead",
+			filesystem: config.FilesystemConfig{
+				DefaultDenyRead: true,
+				AllowRead:       []string{"~/.zshrc"},
+				DenyRead:        []string{"~/.zshrc"},
+			},
+			wantMask: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := &config.Config{Filesystem: tt.filesystem}
+			args := appendLinuxLatePolicyMounts(nil, cfg, cwd, true, nil, false)
+			hasMask := linuxArgsContain(args, []string{"--ro-bind", "/dev/null", zshrc})
+			hasReadOnly := linuxArgsContain(args, []string{"--ro-bind", zshrc, zshrc})
+
+			if hasMask != tt.wantMask {
+				t.Fatalf("mask present = %v, want %v; args=%q", hasMask, tt.wantMask, args)
+			}
+			if hasReadOnly == tt.wantMask {
+				t.Fatalf("read-only bind present = %v, want %v; args=%q", hasReadOnly, !tt.wantMask, args)
+			}
+		})
+	}
+}
+
+func TestAppendLinuxLatePolicyMounts_DefaultDenyReadDangerousSymlinkAlias(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	cwd := t.TempDir()
+
+	dotfiles := filepath.Join(home, "dotfiles")
+	if err := os.MkdirAll(dotfiles, 0o700); err != nil {
+		t.Fatalf("failed to create dotfiles dir: %v", err)
+	}
+	target := filepath.Join(dotfiles, "zshrc")
+	if err := os.WriteFile(target, []byte("export SAFE=1\n"), 0o600); err != nil {
+		t.Fatalf("failed to create zshrc target: %v", err)
+	}
+	link := filepath.Join(home, ".zshrc")
+	if err := os.Symlink(target, link); err != nil {
+		t.Fatalf("failed to create zshrc symlink: %v", err)
+	}
+
+	cfg := &config.Config{
+		Filesystem: config.FilesystemConfig{
+			DefaultDenyRead: true,
+			AllowRead:       []string{"~/.zshrc"},
+		},
+	}
+	args := appendLinuxLatePolicyMounts(nil, cfg, cwd, true, nil, false)
+
+	if !linuxArgsContain(args, []string{"--ro-bind", target, link}) {
+		t.Fatalf("expected read-only alias bind from %q to %q; args=%q", target, link, args)
+	}
+	if !linuxArgsContain(args, []string{"--ro-bind", target, target}) {
+		t.Fatalf("expected resolved target to remain read-only; args=%q", args)
+	}
+}
+
+func TestAppendLinuxLatePolicyMounts_DefaultDenyReadSymlinkedHomeAncestor(t *testing.T) {
+	root := t.TempDir()
+	realHomeRoot := filepath.Join(root, "real-home")
+	realHome := filepath.Join(realHomeRoot, "user")
+	if err := os.MkdirAll(realHome, 0o700); err != nil {
+		t.Fatalf("failed to create real home: %v", err)
+	}
+	homeLink := filepath.Join(root, "home-link")
+	if err := os.Symlink(realHomeRoot, homeLink); err != nil {
+		t.Fatalf("failed to create home symlink: %v", err)
+	}
+	lexicalHome := filepath.Join(homeLink, "user")
+	t.Setenv("HOME", lexicalHome)
+	cwd := t.TempDir()
+
+	target := filepath.Join(realHome, ".zshrc")
+	if err := os.WriteFile(target, []byte("export SAFE=1\n"), 0o600); err != nil {
+		t.Fatalf("failed to create zshrc: %v", err)
+	}
+	lexicalPath := filepath.Join(lexicalHome, ".zshrc")
+
+	cfg := &config.Config{
+		Filesystem: config.FilesystemConfig{
+			DefaultDenyRead: true,
+			AllowRead:       []string{"~/.zshrc"},
+		},
+	}
+	args := appendLinuxLatePolicyMounts(nil, cfg, cwd, true, nil, false)
+
+	if !linuxArgsContain(args, []string{"--ro-bind", target, lexicalPath}) {
+		t.Fatalf("expected read-only alias bind from %q to %q; args=%q", target, lexicalPath, args)
+	}
+	if !linuxArgsContain(args, []string{"--ro-bind", target, target}) {
+		t.Fatalf("expected canonical target to remain read-only; args=%q", args)
+	}
+}
+
+func TestAppendLinuxLatePolicyMounts_DoesNotAliasDangerousDirectoryUnderSymlinkedAncestor(t *testing.T) {
+	root := t.TempDir()
+	realWorkspace := filepath.Join(root, "real-workspace")
+	dangerousDir := filepath.Join(realWorkspace, ".vscode")
+	if err := os.MkdirAll(dangerousDir, 0o700); err != nil {
+		t.Fatalf("failed to create dangerous directory: %v", err)
+	}
+	deniedFile := filepath.Join(dangerousDir, "denied")
+	if err := os.WriteFile(deniedFile, []byte("secret\n"), 0o600); err != nil {
+		t.Fatalf("failed to create denied file: %v", err)
+	}
+
+	workspaceLink := filepath.Join(root, "workspace-link")
+	if err := os.Symlink(realWorkspace, workspaceLink); err != nil {
+		t.Fatalf("failed to create workspace symlink: %v", err)
+	}
+	lexicalDangerousDir := filepath.Join(workspaceLink, ".vscode")
+
+	tests := []struct {
+		name            string
+		denyRead        []string
+		deniedExecPaths []string
+	}{
+		{name: "denyRead descendant", denyRead: []string{deniedFile}},
+		{name: "runtime denied descendant", deniedExecPaths: []string{deniedFile}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := &config.Config{
+				Filesystem: config.FilesystemConfig{
+					DefaultDenyRead: true,
+					AllowRead:       []string{lexicalDangerousDir},
+					DenyRead:        tt.denyRead,
+				},
+			}
+			args := appendLinuxLatePolicyMounts(nil, cfg, workspaceLink, true, tt.deniedExecPaths, false)
+
+			if linuxArgsContain(args, []string{"--ro-bind", dangerousDir, lexicalDangerousDir}) {
+				t.Fatalf("did not expect dangerous directory alias with masked descendants; args=%q", args)
+			}
+			if !linuxArgsContain(args, []string{"--ro-bind", dangerousDir, dangerousDir}) {
+				t.Fatalf("expected canonical dangerous directory to remain read-only; args=%q", args)
+			}
+			if !linuxArgsContain(args, []string{"--ro-bind", "/dev/null", deniedFile}) {
+				t.Fatalf("expected denied descendant to remain masked; args=%q", args)
+			}
+		})
+	}
+}
+
+func TestAppendLinuxLatePolicyMounts_DoesNotAliasRestrictedSources(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	cwd := t.TempDir()
+
+	tests := []struct {
+		name            string
+		target          string
+		deniedExecPaths []string
+		specialSource   bool
+	}{
+		{name: "device source", target: "/dev/null", specialSource: true},
+		{name: "proc source", target: "/proc/self/status", specialSource: true},
+		{name: "runtime denied source", target: filepath.Join(home, "denied-tool"), deniedExecPaths: []string{filepath.Join(home, "denied-tool")}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if strings.HasPrefix(tt.target, home) {
+				if err := os.WriteFile(tt.target, []byte("#!/bin/sh\n"), 0o600); err != nil {
+					t.Fatalf("failed to create runtime-denied target: %v", err)
+				}
+			}
+			link := filepath.Join(home, ".zshrc")
+			if err := os.Symlink(tt.target, link); err != nil {
+				t.Fatalf("failed to create zshrc symlink: %v", err)
+			}
+			t.Cleanup(func() { _ = os.Remove(link) })
+
+			resolved, ok := resolvePathForMount(link)
+			if !ok {
+				t.Fatalf("expected symlink target %q to resolve", tt.target)
+			}
+			cfg := &config.Config{
+				Filesystem: config.FilesystemConfig{
+					DefaultDenyRead: true,
+					AllowRead:       []string{"~/.zshrc"},
+				},
+			}
+			args := appendLinuxLatePolicyMounts(nil, cfg, cwd, true, tt.deniedExecPaths, false)
+			if linuxArgsContain(args, []string{"--ro-bind", resolved, link}) {
+				t.Fatalf("did not expect restricted source %q to be aliased; args=%q", resolved, args)
+			}
+			if tt.specialSource && linuxArgsContain(args, []string{"--ro-bind", resolved, resolved}) {
+				t.Fatalf("did not expect special source %q to be rebound; args=%q", resolved, args)
+			}
+		})
 	}
 }
 

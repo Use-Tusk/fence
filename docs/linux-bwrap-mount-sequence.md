@@ -287,10 +287,17 @@ Protection behavior differs by read mode:
 
 - in normal mode: Fence uses `--ro-bind <path> <path>` to keep the path visible
   but read-only
-- in `defaultDenyRead` mode: Fence uses `--tmpfs` or `/dev/null` masking so it
-  does not accidentally re-expose something that the stricter base view hid
+- in `defaultDenyRead` mode:
+  - paths explicitly covered by `allowRead`, `allowExecute`, or `allowWrite`
+    remain visible through a read-only bind
+  - all other dangerous paths use `--tmpfs` or `/dev/null` masking so mandatory
+    write protection does not accidentally expose something the stricter base
+    view hid
 
 Explicit `denyRead` still wins over this phase.
+Dedicated `/dev` and `/proc` exposure policy also takes precedence, so dangerous
+symlinks into those trees are not restored. Runtime executable denies can
+similarly mask an otherwise readable target.
 
 ### 11. `denyWrite` Read-Only Overlays
 

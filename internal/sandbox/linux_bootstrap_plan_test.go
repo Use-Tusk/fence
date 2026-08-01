@@ -201,8 +201,9 @@ func TestBuildLinuxBootstrapPlanIncludesEveryBridgeDirection(t *testing.T) {
 			SocketPaths: []string{"/tmp/fence-reverse.sock"},
 		},
 		&LocalOutboundBridge{
-			Ports:       []int{5432},
-			SocketPaths: []string{"/tmp/fence-local.sock"},
+			Ports:         []int{5432},
+			SocketPaths:   []string{"/tmp/fence-local-v4.sock"},
+			SocketPathsV6: []string{"/tmp/fence-local-v6.sock"},
 		},
 		linuxBootstrapExecutables{
 			Shell: linuxBootstrapShellPath,
@@ -240,7 +241,14 @@ func TestBuildLinuxBootstrapPlanIncludesEveryBridgeDirection(t *testing.T) {
 			ListenNetwork: "tcp",
 			ListenAddress: "127.0.0.1:5432",
 			TargetNetwork: "unix",
-			TargetAddress: "/tmp/fence-local.sock",
+			TargetAddress: "/tmp/fence-local-v4.sock",
+		},
+		{
+			ListenNetwork: "tcp",
+			ListenAddress: "[::1]:5432",
+			TargetNetwork: "unix",
+			TargetAddress: "/tmp/fence-local-v6.sock",
+			Optional:      true,
 		},
 	}
 	if !reflect.DeepEqual(plan.Bridges, wantBridges) {
@@ -361,8 +369,9 @@ func TestBuildLinuxBootstrapPlanRejectsReservedLocalOutboundPorts(t *testing.T) 
 				},
 				nil,
 				&LocalOutboundBridge{
-					Ports:       []int{port},
-					SocketPaths: []string{"/tmp/fence-local.sock"},
+					Ports:         []int{port},
+					SocketPaths:   []string{"/tmp/fence-local-v4.sock"},
+					SocketPathsV6: []string{"/tmp/fence-local-v6.sock"},
 				},
 				linuxBootstrapExecutables{
 					Shell: linuxBootstrapShellPath,

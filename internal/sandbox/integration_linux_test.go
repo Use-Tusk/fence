@@ -708,6 +708,115 @@ func TestLinux_DefaultDenyReadDoesNotExposeDangerousHomeFiles(t *testing.T) {
 	assertBlocked(t, result)
 }
 
+func TestLinux_DefaultDenyReadKeepsAllowedDangerousHomeFileReadOnly(t *testing.T) {
+	skipIfAlreadySandboxed(t)
+
+	workspace := createTempWorkspace(t)
+	fakeHome := createTempWorkspace(t)
+	t.Setenv("HOME", fakeHome)
+
+	const original = "export SAFE=1\n"
+	zshrcPath := createTestFile(t, fakeHome, ".zshrc", original)
+
+	cfg := testConfigWithWorkspace(workspace)
+	cfg.Filesystem.DefaultDenyRead = true
+	cfg.Filesystem.AllowRead = append(cfg.Filesystem.AllowRead, "~/.zshrc")
+
+	readResult := runUnderSandbox(t, cfg, "cat "+zshrcPath, workspace)
+	assertAllowed(t, readResult)
+	assertContains(t, readResult.Stdout, "export SAFE=1")
+
+	writeResult := runUnderSandbox(t, cfg, "printf malicious >> "+zshrcPath, workspace)
+	assertBlocked(t, writeResult)
+
+	content, err := os.ReadFile(zshrcPath) //nolint:gosec // test-owned path
+	if err != nil {
+		t.Fatalf("failed to read zshrc after blocked write: %v", err)
+	}
+	if string(content) != original {
+		t.Fatalf("dangerous file changed despite write protection: got %q", content)
+	}
+}
+
+func TestLinux_DefaultDenyReadKeepsAllowedDangerousSymlinkReadOnly(t *testing.T) {
+	skipIfAlreadySandboxed(t)
+
+	workspace := createTempWorkspace(t)
+	fakeHome := createTempWorkspace(t)
+	t.Setenv("HOME", fakeHome)
+
+	dotfilesDir := filepath.Join(fakeHome, "dotfiles")
+	if err := os.MkdirAll(dotfilesDir, 0o700); err != nil {
+		t.Fatalf("failed to create dotfiles dir: %v", err)
+	}
+	const original = "export SAFE=1\n"
+	targetPath := createTestFile(t, dotfilesDir, "zshrc", original)
+	zshrcPath := filepath.Join(fakeHome, ".zshrc")
+	if err := os.Symlink(targetPath, zshrcPath); err != nil {
+		t.Fatalf("failed to create zshrc symlink: %v", err)
+	}
+
+	cfg := testConfigWithWorkspace(workspace)
+	cfg.Filesystem.DefaultDenyRead = true
+	cfg.Filesystem.AllowRead = append(cfg.Filesystem.AllowRead, "~/.zshrc")
+
+	readResult := runUnderSandbox(t, cfg, "cat "+zshrcPath, workspace)
+	assertAllowed(t, readResult)
+	assertContains(t, readResult.Stdout, "export SAFE=1")
+
+	writeResult := runUnderSandbox(t, cfg, "printf malicious >> "+zshrcPath, workspace)
+	assertBlocked(t, writeResult)
+
+	content, err := os.ReadFile(targetPath) //nolint:gosec // test-owned path
+	if err != nil {
+		t.Fatalf("failed to read zshrc target after blocked write: %v", err)
+	}
+	if string(content) != original {
+		t.Fatalf("dangerous symlink target changed despite write protection: got %q", content)
+	}
+}
+
+func TestLinux_DefaultDenyReadKeepsDangerousFileUnderSymlinkedHomeReadable(t *testing.T) {
+	skipIfAlreadySandboxed(t)
+
+	workspace := createTempWorkspace(t)
+	homeRoot := createTempWorkspace(t)
+	realHomeRoot := filepath.Join(homeRoot, "real-home")
+	realHome := filepath.Join(realHomeRoot, "user")
+	if err := os.MkdirAll(realHome, 0o700); err != nil {
+		t.Fatalf("failed to create real home: %v", err)
+	}
+	homeLink := filepath.Join(homeRoot, "home-link")
+	if err := os.Symlink(realHomeRoot, homeLink); err != nil {
+		t.Fatalf("failed to create home symlink: %v", err)
+	}
+	lexicalHome := filepath.Join(homeLink, "user")
+	t.Setenv("HOME", lexicalHome)
+
+	const original = "export SAFE=1\n"
+	targetPath := createTestFile(t, realHome, ".zshrc", original)
+	zshrcPath := filepath.Join(lexicalHome, ".zshrc")
+
+	cfg := testConfigWithWorkspace(workspace)
+	cfg.Filesystem.DefaultDenyRead = true
+	cfg.Filesystem.AllowRead = append(cfg.Filesystem.AllowRead, "~/.zshrc")
+
+	readResult := runUnderSandbox(t, cfg, "cat "+zshrcPath, workspace)
+	assertAllowed(t, readResult)
+	assertContains(t, readResult.Stdout, "export SAFE=1")
+
+	writeResult := runUnderSandbox(t, cfg, "printf malicious >> "+zshrcPath, workspace)
+	assertBlocked(t, writeResult)
+
+	content, err := os.ReadFile(targetPath) //nolint:gosec // test-owned path
+	if err != nil {
+		t.Fatalf("failed to read zshrc after blocked write: %v", err)
+	}
+	if string(content) != original {
+		t.Fatalf("dangerous file changed despite write protection: got %q", content)
+	}
+}
+
 // TestLinux_DenyReadTakesPrecedenceOverMandatoryDangerousPath verifies explicit
 // denyRead rules always win over mandatory dangerous-path write protection.
 func TestLinux_DenyReadTakesPrecedenceOverMandatoryDangerousPath(t *testing.T) {
@@ -720,6 +829,8 @@ func TestLinux_DenyReadTakesPrecedenceOverMandatoryDangerousPath(t *testing.T) {
 	zshrcPath := createTestFile(t, fakeHome, ".zshrc", "secret zshrc content")
 
 	cfg := testConfigWithWorkspace(workspace)
+	cfg.Filesystem.DefaultDenyRead = true
+	cfg.Filesystem.AllowRead = append(cfg.Filesystem.AllowRead, "~/.zshrc")
 	cfg.Filesystem.DenyRead = []string{"~/.zshrc"}
 
 	result := runUnderSandbox(t, cfg, "cat "+zshrcPath, workspace)
@@ -1067,6 +1178,52 @@ func TestLinux_AllowLocalOutboundReachesHost(t *testing.T) {
 
 	if result.Failed() {
 		t.Fatalf("expected curl to succeed reaching host loopback via bridge; exit=%d\nstdout: %s\nstderr: %s",
+			result.ExitCode, result.Stdout, result.Stderr)
+	}
+	if !strings.Contains(result.Stdout, markerBody) {
+		t.Fatalf("expected response body %q; got stdout=%q stderr=%q",
+			markerBody, result.Stdout, result.Stderr)
+	}
+}
+
+// TestLinux_AllowLocalOutboundReachesIPv6OnlyHost verifies that the bridge
+// also reaches host services that bind only the IPv6 loopback ([::1]), not
+// 127.0.0.1. This is the common case for Node/Vite dev servers, which
+// resolve "localhost" and can end up IPv6-only depending on DNS ordering.
+func TestLinux_AllowLocalOutboundReachesIPv6OnlyHost(t *testing.T) {
+	skipIfAlreadySandboxed(t)
+	skipIfCommandNotFound(t, "curl")
+
+	features := DetectLinuxFeatures()
+	if !features.CanUnshareNet {
+		t.Skip("skipping: localhost-outbound bridge requires network namespace support")
+	}
+
+	const markerBody = "localhost-outbound bridge reached the IPv6-only host"
+	mux := http.NewServeMux()
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(markerBody))
+	})
+	server := &http.Server{Handler: mux, ReadHeaderTimeout: 2 * time.Second}
+	listener, err := net.Listen("tcp6", "[::1]:0")
+	if err != nil {
+		t.Skipf("skipping: host cannot bind IPv6 loopback: %v", err)
+	}
+	port := listener.Addr().(*net.TCPAddr).Port
+	go func() { _ = server.Serve(listener) }()
+	defer func() { _ = server.Close() }()
+
+	workspace := createTempWorkspace(t)
+	cfg := testConfigWithWorkspace(workspace)
+	trueVal := true
+	cfg.Network.AllowLocalOutbound = &trueVal
+	cfg.Network.AllowLocalOutboundPorts = []int{port}
+
+	url := "http://[::1]:" + strconv.Itoa(port) + "/"
+	result := runUnderSandboxWithTimeout(t, cfg, "curl -sS --max-time 5 "+url, workspace, 15*time.Second)
+
+	if result.Failed() {
+		t.Fatalf("expected curl to succeed reaching IPv6-only host loopback via bridge; exit=%d\nstdout: %s\nstderr: %s",
 			result.ExitCode, result.Stdout, result.Stderr)
 	}
 	if !strings.Contains(result.Stdout, markerBody) {

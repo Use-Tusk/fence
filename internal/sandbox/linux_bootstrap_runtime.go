@@ -107,6 +107,17 @@ func RunLinuxBootstrapBridgeFromEnv() (int, error) {
 			UnlinkExisting: spec.ListenNetwork == "unix",
 		})
 		if err != nil {
+			if spec.Optional {
+				if plan.Debug {
+					fencelog.Printf(
+						"[fence:linux-bootstrap] optional bridge unavailable on %s %s: %v\n",
+						spec.ListenNetwork,
+						spec.ListenAddress,
+						err,
+					)
+				}
+				continue
+			}
 			closeLinuxBootstrapRelays(relays)
 			_ = writeLinuxBootstrapReadyStatus(linuxBootstrapReadyStatus{Error: err.Error()})
 			return 125, fmt.Errorf("start Linux bootstrap bridge: %w", err)

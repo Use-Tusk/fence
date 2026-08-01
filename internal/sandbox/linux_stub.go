@@ -25,8 +25,9 @@ type ReverseBridge struct {
 
 // LocalOutboundBridge is a stub for non-Linux platforms.
 type LocalOutboundBridge struct {
-	Ports       []int
-	SocketPaths []string
+	Ports         []int
+	SocketPaths   []string
+	SocketPathsV6 []string
 }
 
 // LinuxSandboxOptions is a stub for non-Linux platforms.

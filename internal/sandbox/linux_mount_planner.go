@@ -189,6 +189,62 @@ func collectResolvedLinuxLateMountPaths(patterns []string) []string {
 	return paths
 }
 
+// hasExplicitLinuxReadGrant reports whether the config explicitly makes either
+// spelling of a path readable. Dangerous-path protection is write-only, but in
+// defaultDenyRead mode a read-only bind must not expose a path that the read
+// policy never granted. Default system-readable paths are intentionally absent:
+// some (notably /tmp) are replaced inside the sandbox rather than exposing the
+// corresponding host path.
+func hasExplicitLinuxReadGrant(cfg *config.Config, paths ...string) bool {
+	if cfg == nil {
+		return false
+	}
+
+	for _, path := range paths {
+		if path == "" {
+			continue
+		}
+		if _, denied := matchPathRule(path, cfg.Filesystem.DenyRead); denied {
+			return false
+		}
+	}
+
+	grants := [][]string{
+		cfg.Filesystem.AllowRead,
+		cfg.Filesystem.AllowExecute,
+		cfg.Filesystem.AllowWrite,
+	}
+	for _, path := range paths {
+		if path == "" {
+			continue
+		}
+		for _, rules := range grants {
+			if _, allowed := matchPathRule(path, rules); allowed {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func isLinuxSpecialReadSource(path string) bool {
+	return linuxPathContains("/dev", path) || linuxPathContains("/proc", path)
+}
+
+func isLinuxRuntimeDeniedSource(path string, deniedExecPaths []string) bool {
+	path = filepath.Clean(path)
+	for _, deniedPath := range deniedExecPaths {
+		resolved, ok := resolvePathForMount(deniedPath)
+		if ok && filepath.Clean(resolved) == path {
+			return true
+		}
+		if filepath.Clean(deniedPath) == path {
+			return true
+		}
+	}
+	return false
+}
+
 // appendLinuxLatePolicyMounts plans the final policy overlays with subtree-aware
 // precedence so masked directories cannot be punctured by later self-binds.
 func appendLinuxLatePolicyMounts(
@@ -217,13 +273,34 @@ func appendLinuxLatePolicyMounts(
 		if !ok {
 			continue
 		}
-		if defaultDenyRead {
+		// Device and proc exposure is controlled by their dedicated mounts.
+		// Do not let a dangerous symlink create a second path to those sources
+		// or plan a redundant self-bind against the synthetic mount.
+		if isLinuxSpecialReadSource(mountPath) {
+			continue
+		}
+		readable := hasExplicitLinuxReadGrant(cfg, path, mountPath)
+		if defaultDenyRead && !readable {
 			if isDirectory(mountPath) {
 				planner.Add(mountPath, linuxLateMountMaskDir)
 			} else {
 				planner.Add(mountPath, linuxLateMountMaskFile)
 			}
 			continue
+		}
+
+		// NormalizePath resolves symlinks in any path component, so the earlier
+		// allowRead bind exposes only the canonical target. Under
+		// defaultDenyRead the lexical name is otherwise absent because its
+		// containing directory is not mounted. Restore mandatory dangerous file
+		// aliases read-only without bypassing a runtime exec deny. Directories
+		// are excluded because canonical descendant masks would not automatically
+		// carry over to a second bind-mounted view of the subtree.
+		if defaultDenyRead && readable &&
+			!isDirectory(mountPath) &&
+			filepath.Clean(path) != filepath.Clean(mountPath) &&
+			!isLinuxRuntimeDeniedSource(mountPath, deniedExecPaths) {
+			bwrapArgs = append(bwrapArgs, "--ro-bind", mountPath, filepath.Clean(path))
 		}
 		planner.Add(mountPath, linuxLateMountReadOnly)
 	}
