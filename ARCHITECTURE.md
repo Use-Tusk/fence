@@ -300,8 +300,8 @@ flowchart TB
 
     subgraph Sandbox ["Sandbox (bwrap --unshare-net when available)"]
         CMD["User Command"]
-        ISOCAT["socat :3128"]
-        ISOCKS["socat :1080"]
+        INIT["Fence linux-init<br/>(short-lived)"]
+        BRIDGE["Fence bridge helper<br/>:3128 / :1080"]
         ENV2["HTTP_PROXY=127.0.0.1:3128"]
     end
 
@@ -309,14 +309,14 @@ flowchart TB
     SOCKS <--> SSOCAT
     HSOCAT <--> USOCK
     SSOCAT <--> USOCK
-    USOCK <-->|bind-mounted| ISOCAT
-    USOCK <-->|bind-mounted| ISOCKS
-    CMD --> ISOCAT
-    CMD --> ISOCKS
+    INIT --> BRIDGE
+    INIT -->|exec| CMD
+    USOCK <-->|bind-mounted| BRIDGE
+    CMD --> BRIDGE
     CMD -.-> ENV2
 ```
 
-**Why `socat` bridges?**
+**Why Unix-socket bridges?**
 
 When `--unshare-net` is active, the sandbox cannot reach the host network at
 all. Unix sockets provide filesystem-based IPC that works across namespace
@@ -324,8 +324,18 @@ boundaries:
 
 1. Host `socat` connects a Unix socket to the host-side proxy
 2. The Unix socket path is bind-mounted into the sandbox
-3. Sandbox `socat` listens on `127.0.0.1` and forwards to the shared socket
+3. The sandbox Fence bridge helper listens on `127.0.0.1` and forwards to the
+   shared socket
 4. Traffic flows: `sandbox localhost -> Unix socket -> host proxy -> internet`
+
+The staged Fence binary starts in a private `linux-init` mode. It validates a
+versioned bootstrap plan, repairs runtime environment variables, starts one
+bridge helper, waits for listener readiness, and then `exec()`s the security
+shim and workload. Keeping `linux-init` short-lived preserves the workload's
+process identity, signals, PTY behavior, and exit status. The bridge helper
+watches the workload through a pidfd and exits when the workload does. On
+kernels or restricted environments where `pidfd_open` is unavailable, it
+falls back to polling for a parent-PID change.
 
 Linux enforcement also layers in:
 
@@ -339,6 +349,8 @@ Linux enforcement also layers in:
   - `path`: bind-mask selected executables
   - `argv`: use a host-side Fence supervisor plus a sandbox-side shim that
     installs a seccomp user-notification filter for `execve` / `execveat`
+- Go-based in-sandbox bootstrap and relay listeners, independent of shell
+  utilities and sandbox-side `socat`
 - Optional Landlock re-exec via the internal `--landlock-apply` wrapper
 - Optional seccomp and eBPF monitoring
 
@@ -354,7 +366,11 @@ In `argv` mode, the Linux path adds a small helper pipeline:
 If the environment does not support network namespaces (common in some
 containers/CI setups), Fence can still configure proxies and filesystem policy,
 but direct-network isolation becomes a best-effort proxy-oriented fallback
-rather than a hard namespace boundary.
+rather than a hard namespace boundary. In this shared-network mode (also used
+for wildcard network policy), Fence skips the Unix-socket proxy bridge and
+points proxy environment variables directly at the host proxy's random
+loopback ports. The fixed sandbox facade ports 3128 and 1080 are used only
+inside an isolated network namespace.
 
 ## Inbound Connections (Reverse Bridge)
 
@@ -371,14 +387,14 @@ flowchart TB
     end
 
     subgraph Sandbox
-        ISOCAT["socat<br/>UNIX-LISTEN"]
+        BRIDGE["Fence bridge helper<br/>UNIX-LISTEN"]
         APP["App Server<br/>:8888"]
     end
 
     EXT --> HSOCAT
     HSOCAT -->|UNIX-CONNECT| USOCK
-    USOCK <-->|shared via bind mount| ISOCAT
-    ISOCAT --> APP
+    USOCK <-->|shared via bind mount| BRIDGE
+    BRIDGE --> APP
 ```
 
 Flow:
@@ -387,7 +403,7 @@ Flow:
    `127.0.0.1`; configurable per port via the CLI's `-p ADDR:PORT` syntax
    or the library's `ServiceOptions.Exposures`)
 2. A shared Unix socket links host and sandbox
-3. Sandbox `socat` forwards from the shared socket to the app
+3. The sandbox Fence bridge helper forwards from the shared socket to the app
 4. Traffic flows: `outside -> host port -> shared socket -> sandbox app`
 
 If there is no isolated network namespace, a reverse bridge is unnecessary
@@ -420,12 +436,12 @@ flowchart TB
     end
 
     subgraph Sandbox ["Sandbox (bwrap --unshare-net)"]
-        ISOCAT["socat<br/>TCP-LISTEN 127.0.0.1:6379"]
+        BRIDGE["Fence bridge helper<br/>TCP-LISTEN 127.0.0.1:6379"]
         APP["User Command"]
     end
 
-    APP --> ISOCAT
-    ISOCAT -->|UNIX-CONNECT| USOCK
+    APP --> BRIDGE
+    BRIDGE -->|UNIX-CONNECT| USOCK
     USOCK <-->|shared via bind mount| HSOCAT
     HSOCAT --> SVC
 ```
@@ -436,8 +452,8 @@ up IPv6-only depending on DNS ordering) bind only the IPv6 loopback.
 
 Flow (per address family):
 
-1. Sandbox `socat` binds sandbox `127.0.0.1:<port>` (or `::1:<port>`) and
-   forwards to a shared Unix socket
+1. The sandbox Fence bridge helper binds sandbox `127.0.0.1:<port>` (or
+   `::1:<port>`) and forwards to a shared Unix socket
 2. Host `socat` listens on that Unix socket and forwards to host
    `127.0.0.1:<port>` (or `[::1]:<port>`)
 3. `NO_PROXY=localhost,127.0.0.1,::1` continues to direct clients straight at

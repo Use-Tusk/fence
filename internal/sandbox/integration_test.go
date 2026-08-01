@@ -200,6 +200,7 @@ func runUnderSandbox(t *testing.T, cfg *config.Config, command string, workDir s
 	}
 
 	manager := NewManager(cfg, false, false)
+	configureIntegrationManager(t, manager)
 	defer manager.Cleanup()
 
 	if err := manager.Initialize(); err != nil {
@@ -233,6 +234,7 @@ func runUnderSandboxWithTimeout(t *testing.T, cfg *config.Config, command string
 	}
 
 	manager := NewManager(cfg, false, false)
+	configureIntegrationManager(t, manager)
 	defer manager.Cleanup()
 
 	if err := manager.Initialize(); err != nil {

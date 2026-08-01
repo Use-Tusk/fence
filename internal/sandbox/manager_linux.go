@@ -9,13 +9,22 @@ import (
 )
 
 func (m *Manager) initializePlatformNetworking() error {
-	bridge, err := NewLinuxBridge(m.httpPort, m.socksPort, m.debug)
-	if err != nil {
-		_ = m.httpProxy.Stop()
-		_ = m.socksProxy.Stop()
-		return fmt.Errorf("failed to initialize Linux bridge: %w", err)
+	features := DetectLinuxFeatures()
+	useNetworkNamespace := features.CanUnshareNet && !hasWildcardAllowedDomain(m.config)
+	if useNetworkNamespace {
+		bridge, err := NewLinuxBridge(m.httpPort, m.socksPort, m.debug)
+		if err != nil {
+			_ = m.httpProxy.Stop()
+			_ = m.socksProxy.Stop()
+			return fmt.Errorf("failed to initialize Linux bridge: %w", err)
+		}
+		m.linuxBridge = bridge
+	} else {
+		m.linuxBridge = newDirectLinuxBridge(m.httpPort, m.socksPort, m.debug)
+		if m.debug {
+			m.logDebug("Using direct host proxy ports (network namespace not active)")
+		}
 	}
-	m.linuxBridge = bridge
 
 	// Set up reverse bridge for exposed ports (inbound connections).
 	// Only needed when:
@@ -25,7 +34,6 @@ func (m *Manager) initializePlatformNetworking() error {
 	//       ServiceBindsOnHost (docker, podman, ...), the port is bound by
 	//       an external daemon outside the netns; a reverse bridge on the
 	//       same port would collide with the daemon's bind.
-	features := DetectLinuxFeatures()
 	exposures := m.service.resolvedExposures()
 	switch {
 	case len(exposures) == 0:
@@ -34,7 +42,7 @@ func (m *Manager) initializePlatformNetworking() error {
 		if m.debug {
 			m.logDebug("Skipping reverse bridge (ServiceBindsOnHost: external daemon binds ports %v outside sandbox netns)", m.service.resolvedPorts())
 		}
-	case !features.CanUnshareNet:
+	case !useNetworkNamespace:
 		if m.debug {
 			m.logDebug("Skipping reverse bridge (no network namespace, ports accessible directly)")
 		}
@@ -54,7 +62,7 @@ func (m *Manager) initializePlatformNetworking() error {
 	// unshare the network namespace (otherwise sandbox 127.0.0.1 already
 	// is the host's 127.0.0.1 and no forwarding is needed). Wildcard
 	// relaxed mode drops --unshare-net too, so skip there.
-	if m.config != nil && m.config.Network.EffectiveAllowLocalOutbound() && features.CanUnshareNet && !hasWildcardAllowedDomain(m.config) {
+	if m.config != nil && m.config.Network.EffectiveAllowLocalOutbound() && useNetworkNamespace {
 		ports := m.config.Network.AllowLocalOutboundPorts
 		if len(ports) > 0 {
 			loBridge, err := NewLocalOutboundBridge(ports, m.debug)

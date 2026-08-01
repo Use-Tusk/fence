@@ -161,3 +161,47 @@ func TestManagerExposeHostPathAccumulates(t *testing.T) {
 		t.Errorf("second exposure mismatch: %+v", m.exposedHostPaths[1])
 	}
 }
+
+func TestManagerSetLinuxHelperPathCanonicalizesExecutable(t *testing.T) {
+	cfg := &config.Config{}
+	m := NewManager(cfg, false, false)
+
+	tmpDir := t.TempDir()
+	helperPath := filepath.Join(tmpDir, "fence-helper")
+	// #nosec G306 -- test fixture must be executable to exercise helper validation.
+	if err := os.WriteFile(helperPath, []byte("#!/bin/sh\nexit 0\n"), 0o700); err != nil {
+		t.Fatalf("write helper: %v", err)
+	}
+	helperAlias := filepath.Join(tmpDir, "helper-alias")
+	if err := os.Symlink(helperPath, helperAlias); err != nil {
+		t.Fatalf("symlink helper: %v", err)
+	}
+
+	if err := m.SetLinuxHelperPath(helperAlias); err != nil {
+		t.Fatalf("SetLinuxHelperPath() error = %v", err)
+	}
+	want, err := filepath.EvalSymlinks(helperPath)
+	if err != nil {
+		t.Fatalf("EvalSymlinks(helperPath): %v", err)
+	}
+	if m.linuxHelperPath != want {
+		t.Fatalf("linuxHelperPath = %q, want %q", m.linuxHelperPath, want)
+	}
+}
+
+func TestManagerSetLinuxHelperPathRejectsInvalidPaths(t *testing.T) {
+	cfg := &config.Config{}
+	m := NewManager(cfg, false, false)
+
+	if err := m.SetLinuxHelperPath(""); err == nil {
+		t.Fatal("SetLinuxHelperPath(\"\") succeeded, want error")
+	}
+
+	nonExecutable := filepath.Join(t.TempDir(), "helper")
+	if err := os.WriteFile(nonExecutable, []byte("not executable"), 0o600); err != nil {
+		t.Fatalf("write non-executable helper: %v", err)
+	}
+	if err := m.SetLinuxHelperPath(nonExecutable); err == nil {
+		t.Fatal("SetLinuxHelperPath(nonExecutable) succeeded, want error")
+	}
+}

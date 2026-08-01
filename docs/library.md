@@ -15,12 +15,20 @@ package main
 
 import (
     "fmt"
+    "os"
     "os/exec"
 
     "github.com/fencesandbox/fence/pkg/fence"
 )
 
 func main() {
+    if handled, code, err := fence.DispatchInternalHelper(os.Args); handled {
+        if err != nil {
+            fmt.Fprintln(os.Stderr, err)
+        }
+        os.Exit(code)
+    }
+
     // Check platform support
     if !fence.IsSupported() {
         fmt.Println("Sandboxing not supported on this platform")
@@ -37,6 +45,14 @@ func main() {
     // Create and initialize manager
     manager := fence.NewManager(cfg, false, false)
     defer manager.Cleanup()
+
+    executable, err := os.Executable()
+    if err != nil {
+        panic(err)
+    }
+    if err := manager.SetLinuxHelperPath(executable); err != nil {
+        panic(err)
+    }
 
     if err := manager.Initialize(); err != nil {
         panic(err)
@@ -68,6 +84,27 @@ if !fence.IsSupported() {
     log.Fatal("Platform not supported")
 }
 ```
+
+#### `DispatchInternalHelper(args []string) (handled bool, exitCode int, err error)`
+
+Applications that use their own executable as Fence's Linux helper must call
+this before normal flag parsing:
+
+```go
+func main() {
+    if handled, code, err := fence.DispatchInternalHelper(os.Args); handled {
+        if err != nil {
+            fmt.Fprintln(os.Stderr, err)
+        }
+        os.Exit(code)
+    }
+
+    // Normal application startup follows.
+}
+```
+
+The dispatcher recognizes only Fence's private helper modes. Normal application
+arguments return `handled=false`.
 
 #### `DefaultConfig() *Config`
 
@@ -138,12 +175,43 @@ if err := manager.Initialize(); err != nil {
 }
 ```
 
+#### `SetLinuxHelperPath(path string) error`
+
+Configures an executable that implements Fence's private Linux helper modes.
+This enables the Go bootstrap, Landlock, and
+`command.runtimeExecPolicy: "argv"` for library callers.
+
+Use an installed Fence CLI:
+
+```go
+if err := manager.SetLinuxHelperPath("/usr/local/bin/fence"); err != nil {
+    log.Fatal(err)
+}
+```
+
+Alternatively, call `DispatchInternalHelper` at the beginning of your
+application's `main`, then configure the current executable:
+
+```go
+executable, err := os.Executable()
+if err != nil {
+    log.Fatal(err)
+}
+if err := manager.SetLinuxHelperPath(executable); err != nil {
+    log.Fatal(err)
+}
+```
+
+Fence canonicalizes and validates the helper path immediately. The helper must
+be compatible with the library version constructing the sandbox.
+
 #### `WrapCommand(command string) (string, error)`
 
 Wraps a shell command with sandbox restrictions. Returns an error if:
 
 - The command is blocked by policy (`command.deny`)
 - The platform is unsupported
+- Linux helper was not configured with `SetLinuxHelperPath`
 - Initialization fails
 
 ```go
@@ -291,11 +359,21 @@ type FilesystemConfig struct {
 
 ```go
 type CommandConfig struct {
-    Deny        []string // Command patterns to block
-    Allow       []string // Exceptions to deny rules
-    UseDefaults *bool    // Use default deny list (true if nil)
+    Deny              []string          // Command patterns to block
+    Allow             []string          // Exceptions to deny rules
+    UseDefaults       *bool              // Use default deny list (true if nil)
+    RuntimeExecPolicy RuntimeExecPolicy // "path" (default) or Linux-only "argv"
 }
 ```
+
+Enable argv-aware runtime enforcement for child processes on Linux:
+
+```go
+cfg.Command.RuntimeExecPolicy = fence.RuntimeExecPolicyArgv
+```
+
+This mode requires the Linux helper setup described under
+`SetLinuxHelperPath`.
 
 ### SSHConfig
 
@@ -529,15 +607,12 @@ so they differ when embedding:
   hardened environment that strips library-injection variables (`LD_PRELOAD`,
   `LD_LIBRARY_PATH`, `DYLD_INSERT_LIBRARIES`, ...). When you exec the wrapped
   string yourself, strip these variables from the child environment.
-- **Linux Landlock layer.** In-sandbox Landlock rules are applied by
-  re-executing the Fence binary in an internal helper mode, which only works
-  when the running executable is the `fence` CLI. Library embedders skip the
-  Landlock layer; filesystem isolation still comes from bubblewrap mount
-  rules.
-- **`runtimeExecPolicy: "argv"` (Linux).** The argv-aware exec supervisor also
-  requires the `fence` CLI binary to host its helper modes. `WrapCommand`
-  returns an error for this policy in library mode; use the default `"path"`
-  policy instead.
+- **Linux helper-backed layers.** Landlock, the Go in-sandbox bootstrap, and
+  `runtimeExecPolicy: "argv"` require an executable that implements Fence's
+  private helper modes. Call `SetLinuxHelperPath` with an installed Fence CLI,
+  or make the application self-dispatching with `DispatchInternalHelper`.
+  Linux `WrapCommand` returns `ErrLinuxHelperRequired` when no helper is
+  configured; it never silently selects a weaker bootstrap.
 - **Violation monitoring.** The `monitor` flag on `NewManager` covers proxy
   denials only. The CLI's `-m` additionally starts platform monitors (macOS
   `log stream`, Linux eBPF) that are not exposed through the public API.

@@ -25,11 +25,9 @@ import (
 // ============================================================================
 
 // skipIfLandlockNotUsable skips tests that require the Landlock wrapper.
-// The Landlock wrapper re-executes the binary with --landlock-apply, which only
-// the fence CLI understands. Test binaries (e.g., sandbox.test) don't have this
-// handler, so Landlock tests must be skipped when not running as the fence CLI.
-// TODO: consider removing tests that call this function, for now can keep them
-// as documentation.
+// These direct internal tests predate helper-backed execution and make
+// host-visible assertions that are not valid with the /tmp-overlaid Go
+// bootstrap. Real-binary and helper-backed tests cover Landlock separately.
 func skipIfLandlockNotUsable(t *testing.T) {
 	t.Helper()
 	features := DetectLinuxFeatures()
@@ -38,7 +36,7 @@ func skipIfLandlockNotUsable(t *testing.T) {
 	}
 	exePath, _ := os.Executable()
 	if !strings.Contains(filepath.Base(exePath), "fence") {
-		t.Skip("skipping: Landlock wrapper requires fence CLI (test binary cannot use --landlock-apply)")
+		t.Skip("skipping legacy direct Landlock assertion; helper-backed coverage runs separately")
 	}
 }
 
@@ -74,6 +72,7 @@ func runUnderLinuxSandboxDirect(t *testing.T, cfg *config.Config, command string
 		UseSeccomp:  false,
 		UseEBPF:     false,
 		ShellMode:   ShellModeDefault,
+		HelperPath:  testLinuxHelperPath(t),
 		WorkDir:     workDir,
 	})
 	if err != nil {
@@ -99,6 +98,35 @@ func buildFenceCLIBinary(t *testing.T) string {
 		t.Fatalf("failed to build fence CLI: %v", err)
 	}
 	return fenceBin
+}
+
+func runUnderSandboxWithLinuxHelper(
+	t *testing.T,
+	cfg *config.Config,
+	command string,
+	workDir string,
+	helperPath string,
+	timeout time.Duration,
+) *SandboxTestResult {
+	t.Helper()
+	manager := NewManager(cfg, false, false)
+	if err := manager.SetLinuxHelperPath(helperPath); err != nil {
+		return &SandboxTestResult{Error: err}
+	}
+	defer manager.Cleanup()
+
+	if err := manager.Initialize(); err != nil {
+		return &SandboxTestResult{Error: err}
+	}
+	wrapped, err := manager.WrapCommandInDir(command, workDir)
+	if err != nil {
+		return &SandboxTestResult{
+			ExitCode: 1,
+			Stderr:   err.Error(),
+			Error:    err,
+		}
+	}
+	return executeShellCommandWithTimeout(t, wrapped, workDir, timeout)
 }
 
 // TestLinux_LandlockBlocksWriteOutsideWorkspace verifies that Landlock prevents
@@ -377,6 +405,139 @@ func TestLinux_RuntimeExecDeny_DoesNotCrashOnBinAliasPath(t *testing.T) {
 	result := runUnderSandbox(t, cfg, "echo 'sandbox ok'", workspace)
 	assertAllowed(t, result)
 	assertContains(t, result.Stdout, "sandbox ok")
+}
+
+func TestLinux_GoBootstrap_RuntimeExecDenyCompletesWorkload(t *testing.T) {
+	skipIfAlreadySandboxed(t)
+	skipIfCommandNotFound(t, "chroot")
+	skipIfCommandNotFound(t, "socat")
+
+	fenceBin := buildFenceCLIBinary(t)
+	workspace := createTempWorkspace(t)
+	cfg := testConfigWithWorkspace(workspace)
+	cfg.Command.Deny = []string{"chroot"}
+	cfg.Command.UseDefaults = boolPtr(false)
+
+	configJSON, err := json.Marshal(cfg)
+	if err != nil {
+		t.Fatalf("marshal config: %v", err)
+	}
+	configPath := filepath.Join(t.TempDir(), "go-bootstrap.json")
+	if err := os.WriteFile(configPath, configJSON, 0o600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	command := `printf 'SANDBOX=%s\nNO_PROXY=%s\n' "$FENCE_SANDBOX" "$NO_PROXY" && test -z "${FENCE_LINUX_BOOTSTRAP_PLAN+x}" && test -z "${FENCE_CONFIG_JSON+x}" && echo INTERNAL_ENV_CLEARED && echo GO_BOOTSTRAP_OK`
+	result := executeShellCommand(
+		t,
+		ShellQuote([]string{fenceBin, "--debug", "--settings", configPath, "--", "sh", "-c", command}),
+		workspace,
+	)
+
+	assertAllowed(t, result)
+	assertContains(t, result.Stdout, "SANDBOX=1")
+	assertContains(t, result.Stdout, "NO_PROXY=localhost,127.0.0.1,::1")
+	assertContains(t, result.Stdout, "INTERNAL_ENV_CLEARED")
+	assertContains(t, result.Stdout, "GO_BOOTSTRAP_OK")
+	assertContains(t, result.Stderr, "[fence:linux] Using Go-based Linux bootstrap")
+}
+
+func TestLinux_GoBootstrapSurvivesMulticallDeny(t *testing.T) {
+	skipIfAlreadySandboxed(t)
+	skipIfCommandNotFound(t, "socat")
+
+	type multicallBinary struct {
+		name     string
+		path     string
+		resolved string
+	}
+	var candidates []multicallBinary
+	for _, name := range []string{"coreutils", "busybox"} {
+		path, err := exec.LookPath(name)
+		if err != nil {
+			continue
+		}
+		resolved, err := filepath.EvalSymlinks(path)
+		if err != nil {
+			t.Fatalf("resolve %s symlinks: %v", name, err)
+		}
+		candidates = append(candidates, multicallBinary{
+			name:     name,
+			path:     path,
+			resolved: resolved,
+		})
+	}
+	if len(candidates) == 0 {
+		t.Skip("skipping: neither coreutils nor busybox multicall binary is installed")
+	}
+
+	fenceBin := buildFenceCLIBinary(t)
+	workspace := createTempWorkspace(t)
+	originalPath := os.Getenv("PATH")
+
+	for _, candidate := range candidates {
+		t.Run(candidate.name, func(t *testing.T) {
+			aliasDir := t.TempDir()
+			if err := os.Symlink(candidate.path, filepath.Join(aliasDir, "chroot")); err != nil {
+				t.Fatalf("create %s chroot alias: %v", candidate.name, err)
+			}
+			t.Setenv("PATH", aliasDir+string(os.PathListSeparator)+originalPath)
+
+			cfg := testConfigWithWorkspace(workspace)
+			cfg.Command.Deny = []string{"chroot"}
+			cfg.Command.UseDefaults = boolPtr(false)
+
+			configJSON, err := json.Marshal(cfg)
+			if err != nil {
+				t.Fatalf("marshal config: %v", err)
+			}
+			configPath := filepath.Join(t.TempDir(), "multicall-bootstrap.json")
+			if err := os.WriteFile(configPath, configJSON, 0o600); err != nil {
+				t.Fatalf("write config: %v", err)
+			}
+
+			result := executeShellCommand(
+				t,
+				ShellQuote([]string{fenceBin, "--debug", "--settings", configPath, "--", "sh", "-c", "echo MULTICALL_BOOTSTRAP_OK"}),
+				workspace,
+			)
+			assertAllowed(t, result)
+			assertContains(t, result.Stdout, "MULTICALL_BOOTSTRAP_OK")
+			assertContains(t, result.Stderr, "[fence:linux] Using Go-based Linux bootstrap")
+			assertContains(t, result.Stderr, "--ro-bind /dev/null "+candidate.resolved)
+		})
+	}
+}
+
+func TestLinux_LibraryExplicitHelperUsesGoBootstrap(t *testing.T) {
+	skipIfAlreadySandboxed(t)
+	skipIfCommandNotFound(t, "socat")
+
+	fenceBin := buildFenceCLIBinary(t)
+	workspace := createTempWorkspace(t)
+	cfg := testConfigWithWorkspace(workspace)
+
+	manager := NewManager(cfg, false, false)
+	if err := manager.SetLinuxHelperPath(fenceBin); err != nil {
+		t.Fatalf("SetLinuxHelperPath() error = %v", err)
+	}
+	defer manager.Cleanup()
+
+	wrapped, err := manager.WrapCommandInDir(
+		`printf 'SANDBOX=%s\n' "$FENCE_SANDBOX" && echo LIBRARY_HELPER_OK`,
+		workspace,
+	)
+	if err != nil {
+		t.Fatalf("WrapCommandInDir() error = %v", err)
+	}
+	if !strings.Contains(wrapped, "--linux-bootstrap-init") {
+		t.Fatalf("wrapped command does not use Go bootstrap: %s", wrapped)
+	}
+
+	result := executeShellCommand(t, wrapped, workspace)
+	assertAllowed(t, result)
+	assertContains(t, result.Stdout, "SANDBOX=1")
+	assertContains(t, result.Stdout, "LIBRARY_HELPER_OK")
 }
 
 // TestLinux_RuntimeExecDeny_ChrootBlockedWhenMountable verifies runtime exec
@@ -822,8 +983,67 @@ func TestLinux_NetworkBlocksDevTcp(t *testing.T) {
 	assertBlocked(t, result)
 }
 
-// TestLinux_ExposedPortAllowsHostReachability verifies the library-based Linux
-// sandbox path can expose a localhost service back to the host.
+func TestLinux_SharedNetworkUsesDirectProxyPorts(t *testing.T) {
+	skipIfAlreadySandboxed(t)
+	skipIfCommandNotFound(t, "python3")
+
+	httpReservation, err := net.Listen("tcp", "127.0.0.1:3128")
+	if err != nil {
+		t.Skipf("cannot reserve host HTTP facade port: %v", err)
+	}
+	defer func() { _ = httpReservation.Close() }()
+	socksReservation, err := net.Listen("tcp", "127.0.0.1:1080")
+	if err != nil {
+		t.Skipf("cannot reserve host SOCKS facade port: %v", err)
+	}
+	defer func() { _ = socksReservation.Close() }()
+
+	workspace := createTempWorkspace(t)
+	cfg := testConfigWithWorkspace(workspace)
+	cfg.Network.AllowedDomains = []string{"*"}
+	exposureReservation, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("reserve exposed port: %v", err)
+	}
+	exposedPort := exposureReservation.Addr().(*net.TCPAddr).Port
+	_ = exposureReservation.Close()
+
+	manager := NewManager(cfg, false, false)
+	configureIntegrationManager(t, manager)
+	manager.SetService(ServiceOptions{Exposures: []ExposedPort{LoopbackPort(exposedPort)}})
+	defer manager.Cleanup()
+	if err := manager.Initialize(); err != nil {
+		t.Fatalf("Initialize() error = %v", err)
+	}
+	if manager.linuxBridge.HTTPSocketPath != "" || manager.linuxBridge.SOCKSSocketPath != "" {
+		t.Fatalf("shared-network mode unexpectedly created Unix proxy bridges: %+v", manager.linuxBridge)
+	}
+	if manager.reverseBridge != nil {
+		t.Fatalf("shared-network mode unexpectedly created a reverse bridge: %+v", manager.reverseBridge)
+	}
+
+	wrapped, err := manager.WrapCommandInDir(
+		fmt.Sprintf(
+			`printf 'HTTP=%%s\nALL=%%s\n' "$HTTP_PROXY" "$ALL_PROXY"; python3 -c "import socket; s=socket.socket(); s.bind(('127.0.0.1', %d)); print('BOUND'); s.close()"`,
+			exposedPort,
+		),
+		workspace,
+	)
+	if err != nil {
+		t.Fatalf("WrapCommandInDir() error = %v", err)
+	}
+	result := executeShellCommand(t, wrapped, workspace)
+	assertAllowed(t, result)
+	if strings.Contains(result.Stdout, ":3128") || strings.Contains(result.Stdout, ":1080") {
+		t.Fatalf("shared-network proxy environment used reserved facade ports:\n%s", result.Stdout)
+	}
+	assertContains(t, result.Stdout, "HTTP=http://127.0.0.1:")
+	assertContains(t, result.Stdout, "ALL=socks5h://127.0.0.1:")
+	assertContains(t, result.Stdout, "BOUND")
+}
+
+// TestLinux_ExposedPortAllowsHostReachability verifies the helper-backed
+// library path can expose a sandboxed localhost service back to the host.
 func TestLinux_ExposedPortAllowsHostReachability(t *testing.T) {
 	skipIfAlreadySandboxed(t)
 	skipIfCommandNotFound(t, "python3")
@@ -834,6 +1054,7 @@ func TestLinux_ExposedPortAllowsHostReachability(t *testing.T) {
 	}
 
 	workspace := createTempWorkspace(t)
+	fenceBin := buildFenceCLIBinary(t)
 	cfg := testConfigWithWorkspace(workspace)
 	cfg.Network.AllowLocalBinding = true
 	markerName := "fence-exposed-port-marker.txt"
@@ -860,6 +1081,9 @@ func TestLinux_ExposedPortAllowsHostReachability(t *testing.T) {
 
 		attemptErr := func() error {
 			manager := NewManager(cfg, false, false)
+			if err := manager.SetLinuxHelperPath(fenceBin); err != nil {
+				return fmt.Errorf("configure Linux helper: %w", err)
+			}
 			manager.SetService(ServiceOptions{Exposures: []ExposedPort{LoopbackPort(port)}})
 			defer manager.Cleanup()
 
@@ -956,6 +1180,7 @@ func TestLinux_AllowLocalOutboundReachesHost(t *testing.T) {
 	go func() { _ = server.Serve(listener) }()
 	defer func() { _ = server.Close() }()
 
+	fenceBin := buildFenceCLIBinary(t)
 	workspace := createTempWorkspace(t)
 	cfg := testConfigWithWorkspace(workspace)
 	trueVal := true
@@ -964,7 +1189,14 @@ func TestLinux_AllowLocalOutboundReachesHost(t *testing.T) {
 
 	url := "http://127.0.0.1:" + strconv.Itoa(port) + "/"
 	// -sS: silent but show errors; --max-time bounds the overall request.
-	result := runUnderSandboxWithTimeout(t, cfg, "curl -sS --max-time 5 "+url, workspace, 15*time.Second)
+	result := runUnderSandboxWithLinuxHelper(
+		t,
+		cfg,
+		"curl -sS --max-time 5 "+url,
+		workspace,
+		fenceBin,
+		15*time.Second,
+	)
 
 	if result.Failed() {
 		t.Fatalf("expected curl to succeed reaching host loopback via bridge; exit=%d\nstdout: %s\nstderr: %s",
@@ -1208,8 +1440,19 @@ func TestLinux_XDGRuntimeDirFallbackIsCleanedUpOnExit(t *testing.T) {
 	if runtimeDir == "" {
 		t.Fatal("expected sandbox output to include XDG runtime dir")
 	}
-	if _, err := os.Stat(runtimeDir); !os.IsNotExist(err) {
-		t.Fatalf("expected fallback runtime dir %q to be cleaned up, stat err=%v", runtimeDir, err)
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		_, err := os.Stat(runtimeDir)
+		if os.IsNotExist(err) {
+			break
+		}
+		if err != nil {
+			t.Fatalf("stat fallback runtime dir %q: %v", runtimeDir, err)
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("expected fallback runtime dir %q to be cleaned up", runtimeDir)
+		}
+		time.Sleep(10 * time.Millisecond)
 	}
 }
 

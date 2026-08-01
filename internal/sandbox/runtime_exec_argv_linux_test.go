@@ -3,7 +3,7 @@
 package sandbox
 
 import (
-	"os"
+	"errors"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -237,17 +237,9 @@ func TestIsLinuxBootstrapExecPath_OnlyAllowsStagedExecutables(t *testing.T) {
 	}
 }
 
-func TestWrapCommandLinuxWithOptions_ArgvRuntimeExecPolicyRequiresFenceCLI(t *testing.T) {
-	exePath, err := os.Executable()
-	if err != nil {
-		t.Fatalf("failed to get executable path: %v", err)
-	}
-	if strings.Contains(filepath.Base(exePath), "fence") {
-		t.Skip("current executable already looks like fence CLI")
-	}
-
+func TestWrapCommandLinuxWithOptions_RequiresExplicitHelper(t *testing.T) {
 	useDefaults := false
-	_, err = WrapCommandLinuxWithOptions(&config.Config{
+	_, err := WrapCommandLinuxWithOptions(&config.Config{
 		Command: config.CommandConfig{
 			Deny:              []string{"git push"},
 			UseDefaults:       &useDefaults,
@@ -260,9 +252,9 @@ func TestWrapCommandLinuxWithOptions_ArgvRuntimeExecPolicyRequiresFenceCLI(t *te
 		ShellMode:   ShellModeDefault,
 	})
 	if err == nil {
-		t.Fatal("expected argv runtime exec policy to require fence CLI executable")
+		t.Fatal("expected Linux wrapping to require an explicit helper")
 	}
-	if !strings.Contains(err.Error(), "runtime supervisor") {
-		t.Fatalf("expected runtime supervisor error, got: %v", err)
+	if !errors.Is(err, ErrLinuxHelperRequired) {
+		t.Fatalf("expected ErrLinuxHelperRequired, got: %v", err)
 	}
 }

@@ -192,6 +192,7 @@ func TestWrapCommandLinuxWithOptions_DropsShellFromRuntimeDenyMounts(t *testing.
 		UseSeccomp:  false,
 		UseEBPF:     false,
 		ShellMode:   ShellModeDefault,
+		HelperPath:  testLinuxHelperPath(t),
 	})
 	if err != nil {
 		t.Fatalf("WrapCommandLinuxWithOptions failed: %v", err)
@@ -222,6 +223,7 @@ func TestWrapCommandLinuxWithOptions_UsesStagedBootstrapShell(t *testing.T) {
 		UseSeccomp:  false,
 		UseEBPF:     false,
 		ShellMode:   ShellModeDefault,
+		HelperPath:  testLinuxHelperPath(t),
 	})
 	if err != nil {
 		t.Fatalf("WrapCommandLinuxWithOptions failed: %v", err)
@@ -232,9 +234,86 @@ func TestWrapCommandLinuxWithOptions_UsesStagedBootstrapShell(t *testing.T) {
 		t.Fatalf("expected staged shell mount in command: %s", cmd)
 	}
 
-	execFragment := ShellQuote([]string{"--", linuxBootstrapShellPath, "-c"})
-	if !strings.Contains(cmd, execFragment) {
-		t.Fatalf("expected sandbox to launch staged shell in command: %s", cmd)
+	for _, fragment := range []string{`"argv"`, linuxBootstrapShellPath, `"echo ok"`} {
+		if !strings.Contains(cmd, fragment) {
+			t.Fatalf("expected bootstrap plan to contain %q: %s", fragment, cmd)
+		}
+	}
+}
+
+func TestPlanLinuxBootstrapExecutables_StagesExplicitHelperFromTmp(t *testing.T) {
+	shellPath, _, err := ResolveExecutionShell(ShellModeDefault, false)
+	if err != nil {
+		t.Skipf("default shell unavailable: %v", err)
+	}
+
+	helperPath := filepath.Join(t.TempDir(), "embedded-helper")
+	// #nosec G306 -- test fixture must be executable to model a staged helper.
+	if err := os.WriteFile(helperPath, []byte("#!/bin/sh\nexit 0\n"), 0o700); err != nil {
+		t.Fatalf("write helper: %v", err)
+	}
+
+	mounts, execs, err := planLinuxBootstrapExecutables(shellPath, helperPath)
+	if err != nil {
+		t.Fatalf("planLinuxBootstrapExecutables() error = %v", err)
+	}
+	if execs.Fence != linuxBootstrapFencePath {
+		t.Fatalf("staged helper path = %q, want %q", execs.Fence, linuxBootstrapFencePath)
+	}
+
+	helperSource, ok := resolvePathForMount(helperPath)
+	if !ok {
+		t.Fatalf("expected helper path %q to be mountable", helperPath)
+	}
+	found := false
+	for _, mount := range mounts {
+		if mount.Source == helperSource && mount.Destination == linuxBootstrapFencePath {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("helper mount %q -> %q not found in %#v", helperSource, linuxBootstrapFencePath, mounts)
+	}
+}
+
+func TestWrapCommandLinuxWithOptions_ExplicitHelperUsesGoBootstrap(t *testing.T) {
+	if _, err := exec.LookPath("bwrap"); err != nil {
+		t.Skip("bwrap not available")
+	}
+
+	helperPath := filepath.Join(t.TempDir(), "fence-helper")
+	// #nosec G306 -- test fixture must be executable to model a staged helper.
+	if err := os.WriteFile(helperPath, []byte("#!/bin/sh\nexit 0\n"), 0o700); err != nil {
+		t.Fatalf("write helper: %v", err)
+	}
+
+	cmd, err := WrapCommandLinuxWithOptions(&config.Config{}, "echo ok", nil, nil, LinuxSandboxOptions{
+		UseLandlock: false,
+		UseSeccomp:  false,
+		UseEBPF:     false,
+		ShellMode:   ShellModeDefault,
+		HelperPath:  helperPath,
+	})
+	if err != nil {
+		t.Fatalf("WrapCommandLinuxWithOptions() error = %v", err)
+	}
+	for _, want := range []string{
+		linuxBootstrapPlanEnv,
+		linuxBootstrapFencePath,
+		"--linux-bootstrap-init",
+	} {
+		if !strings.Contains(cmd, want) {
+			t.Fatalf("Go bootstrap command missing %q: %s", want, cmd)
+		}
+	}
+	for _, notWant := range []string{
+		"/tmp/fence/bin/socat",
+		"fence_wait_for_helpers",
+	} {
+		if strings.Contains(cmd, notWant) {
+			t.Fatalf("Go bootstrap command unexpectedly contains %q: %s", notWant, cmd)
+		}
 	}
 }
 
@@ -409,19 +488,37 @@ func TestEffectiveLinuxForceNewSession(t *testing.T) {
 	})
 }
 
-func TestBootstrapPIDVars_LocalOutboundIPv6LegIsBestEffort(t *testing.T) {
-	localOutboundBridge := &LocalOutboundBridge{Ports: []int{5432, 6379}}
-
-	pidVars := bootstrapPIDVars(nil, nil, localOutboundBridge)
-
-	want := []string{"LO_5432_PID", "LO_6379_PID"}
-	if !slices.Equal(pidVars, want) {
-		t.Fatalf("bootstrapPIDVars() = %v, want %v", pidVars, want)
+func TestLinuxBootstrapPlan_LocalOutboundIPv6LegIsBestEffort(t *testing.T) {
+	plan, err := buildLinuxBootstrapPlan(
+		&config.Config{},
+		"echo ok",
+		nil,
+		nil,
+		&LocalOutboundBridge{
+			Ports:         []int{5432},
+			SocketPaths:   []string{"/tmp/fence-local-v4.sock"},
+			SocketPathsV6: []string{"/tmp/fence-local-v6.sock"},
+		},
+		linuxBootstrapExecutables{
+			Shell: linuxBootstrapShellPath,
+			Fence: linuxBootstrapFencePath,
+		},
+		"-c",
+		false,
+		false,
+		false,
+	)
+	if err != nil {
+		t.Fatalf("buildLinuxBootstrapPlan() error = %v", err)
 	}
-	for _, v := range pidVars {
-		if strings.HasPrefix(v, "LO6_") {
-			t.Fatalf("bootstrapPIDVars() must not require the IPv6 leg to stay alive, got %v", pidVars)
-		}
+	if len(plan.Bridges) != 2 {
+		t.Fatalf("bridge count = %d, want IPv4 and IPv6 legs", len(plan.Bridges))
+	}
+	if plan.Bridges[0].Optional {
+		t.Fatal("IPv4 local-outbound leg must be required")
+	}
+	if !plan.Bridges[1].Optional {
+		t.Fatal("IPv6 local-outbound leg must be optional")
 	}
 }
 
@@ -441,6 +538,7 @@ func TestWrapCommandLinuxWithOptions_UsesMinimalDevMode(t *testing.T) {
 		UseSeccomp:  false,
 		UseEBPF:     false,
 		ShellMode:   ShellModeDefault,
+		HelperPath:  testLinuxHelperPath(t),
 	})
 	if err != nil {
 		t.Fatalf("WrapCommandLinuxWithOptions failed: %v", err)
@@ -494,6 +592,7 @@ func TestWrapCommandLinuxWithOptions_RespectsForceNewSessionOverride(t *testing.
 		UseSeccomp:  false,
 		UseEBPF:     false,
 		ShellMode:   ShellModeDefault,
+		HelperPath:  testLinuxHelperPath(t),
 	})
 	if err != nil {
 		t.Fatalf("WrapCommandLinuxWithOptions failed: %v", err)
@@ -520,6 +619,7 @@ func TestWrapCommandLinuxWithOptions_UsesHostDevMode(t *testing.T) {
 		UseSeccomp:  false,
 		UseEBPF:     false,
 		ShellMode:   ShellModeDefault,
+		HelperPath:  testLinuxHelperPath(t),
 	})
 	if err != nil {
 		t.Fatalf("WrapCommandLinuxWithOptions failed: %v", err)
@@ -555,6 +655,7 @@ func TestWrapCommandLinuxWithOptions_RootBindPrecedesSpecialMounts(t *testing.T)
 		UseSeccomp:  false,
 		UseEBPF:     false,
 		ShellMode:   ShellModeDefault,
+		HelperPath:  testLinuxHelperPath(t),
 	})
 	if err != nil {
 		t.Fatalf("WrapCommandLinuxWithOptions failed: %v", err)
@@ -575,6 +676,51 @@ func TestWrapCommandLinuxWithOptions_RootBindPrecedesSpecialMounts(t *testing.T)
 	}
 	if rootIdx > nullIdx {
 		t.Fatalf("expected root bind to appear before device passthroughs: %s", cmd)
+	}
+}
+
+func TestWrapCommandLinuxWithOptions_AllowWriteTmpKeepsPrivateTmpfs(t *testing.T) {
+	if _, err := exec.LookPath("bwrap"); err != nil {
+		t.Skip("bwrap not available")
+	}
+
+	cfg := &config.Config{
+		Filesystem: config.FilesystemConfig{
+			AllowWrite: []string{"/tmp"},
+		},
+	}
+	cmd, err := WrapCommandLinuxWithOptions(cfg, "echo ok", nil, nil, LinuxSandboxOptions{
+		UseLandlock: false,
+		UseSeccomp:  false,
+		UseEBPF:     false,
+		ShellMode:   ShellModeDefault,
+		HelperPath:  testLinuxHelperPath(t),
+	})
+	if err != nil {
+		t.Fatalf("WrapCommandLinuxWithOptions failed: %v", err)
+	}
+	if !strings.Contains(cmd, ShellQuote([]string{"--tmpfs", "/tmp"})) {
+		t.Fatalf("expected private /tmp tmpfs in command: %s", cmd)
+	}
+	if strings.Contains(cmd, ShellQuote([]string{"--bind", "/tmp", "/tmp"})) {
+		t.Fatalf("allowWrite /tmp must not replace the private tmpfs with host /tmp: %s", cmd)
+	}
+}
+
+func TestLinuxDedicatedWritableMount(t *testing.T) {
+	for _, test := range []struct {
+		path string
+		want bool
+	}{
+		{path: "/tmp", want: true},
+		{path: "/tmp/", want: true},
+		{path: "/private/tmp", want: false},
+	} {
+		t.Run(test.path, func(t *testing.T) {
+			if got := linuxDedicatedWritableMount(test.path); got != test.want {
+				t.Fatalf("linuxDedicatedWritableMount(%q) = %v, want %v", test.path, got, test.want)
+			}
+		})
 	}
 }
 
@@ -599,6 +745,7 @@ func TestWrapCommandLinuxWithOptions_ExposedHostPathsEmitBinds(t *testing.T) {
 		UseSeccomp:  false,
 		UseEBPF:     false,
 		ShellMode:   ShellModeDefault,
+		HelperPath:  testLinuxHelperPath(t),
 		ExposedHostPaths: []exposedHostPath{
 			{path: roPath, writable: false},
 			{path: rwPath, writable: true},
@@ -657,6 +804,7 @@ func TestWrapCommandLinuxWithOptions_ExposedHostPathUnder_TmpSurvivesTmpfs(t *te
 		UseSeccomp:  false,
 		UseEBPF:     false,
 		ShellMode:   ShellModeDefault,
+		HelperPath:  testLinuxHelperPath(t),
 		ExposedHostPaths: []exposedHostPath{
 			{path: f.Name(), writable: false},
 		},
@@ -994,6 +1142,7 @@ func TestWrapCommandLinuxWithOptions_DenyReadDirectoryWinsOverSamePathDenyWrite(
 		UseSeccomp:  false,
 		UseEBPF:     false,
 		ShellMode:   ShellModeDefault,
+		HelperPath:  testLinuxHelperPath(t),
 	})
 	if err != nil {
 		t.Fatalf("WrapCommandLinuxWithOptions failed: %v", err)
@@ -1036,6 +1185,7 @@ func TestWrapCommandLinuxWithOptions_DenyReadDirectoryWinsOverChildDenyWrite(t *
 		UseSeccomp:  false,
 		UseEBPF:     false,
 		ShellMode:   ShellModeDefault,
+		HelperPath:  testLinuxHelperPath(t),
 	})
 	if err != nil {
 		t.Fatalf("WrapCommandLinuxWithOptions failed: %v", err)
@@ -1074,6 +1224,7 @@ func TestWrapCommandLinuxWithOptions_DenyReadFileWinsOverSamePathDenyWrite(t *te
 		UseSeccomp:  false,
 		UseEBPF:     false,
 		ShellMode:   ShellModeDefault,
+		HelperPath:  testLinuxHelperPath(t),
 	})
 	if err != nil {
 		t.Fatalf("WrapCommandLinuxWithOptions failed: %v", err)

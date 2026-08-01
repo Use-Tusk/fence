@@ -12,6 +12,8 @@ import (
 type LinuxBridge struct {
 	HTTPSocketPath  string
 	SOCKSSocketPath string
+	HTTPProxyPort   int
+	SOCKSProxyPort  int
 }
 
 // ReverseBridge is a stub for non-Linux platforms.
@@ -23,8 +25,9 @@ type ReverseBridge struct {
 
 // LocalOutboundBridge is a stub for non-Linux platforms.
 type LocalOutboundBridge struct {
-	Ports       []int
-	SocketPaths []string
+	Ports         []int
+	SocketPaths   []string
+	SocketPathsV6 []string
 }
 
 // LinuxSandboxOptions is a stub for non-Linux platforms.
@@ -36,6 +39,7 @@ type LinuxSandboxOptions struct {
 	Debug               bool
 	ShellMode           string
 	ShellLogin          bool
+	HelperPath          string
 	WorkDir             string
 	LocalOutboundBridge *LocalOutboundBridge
 	ExposedHostPaths    []exposedHostPath
@@ -67,16 +71,6 @@ func NewLocalOutboundBridge(ports []int, debug bool) (*LocalOutboundBridge, erro
 
 // Cleanup is a no-op on non-Linux platforms.
 func (b *LocalOutboundBridge) Cleanup() {}
-
-// WrapCommandLinux returns an error on non-Linux platforms.
-func WrapCommandLinux(cfg *config.Config, command string, bridge *LinuxBridge, reverseBridge *ReverseBridge, debug bool) (string, error) {
-	return "", fmt.Errorf("linux sandbox not available on this platform")
-}
-
-// WrapCommandLinuxWithShell returns an error on non-Linux platforms.
-func WrapCommandLinuxWithShell(cfg *config.Config, command string, workingDir string, bridge *LinuxBridge, reverseBridge *ReverseBridge, debug bool, shellMode string, shellLogin bool) (string, error) {
-	return "", fmt.Errorf("linux sandbox not available on this platform")
-}
 
 // WrapCommandLinuxWithOptions returns an error on non-Linux platforms.
 func WrapCommandLinuxWithOptions(cfg *config.Config, command string, bridge *LinuxBridge, reverseBridge *ReverseBridge, opts LinuxSandboxOptions) (string, error) {
