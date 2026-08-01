@@ -97,7 +97,7 @@ func TestResolvePathForMount_NonexistentPath(t *testing.T) {
 	}
 }
 
-func TestResolveLinuxCrossMountCandidates_CanonicalizesAndMergesWritableAliases(t *testing.T) {
+func TestResolveLinuxCrossMountCandidates_CanonicalizesAndPropagatesWritableAliases(t *testing.T) {
 	tmpDir := t.TempDir()
 	target := filepath.Join(tmpDir, "target")
 	if err := os.Mkdir(target, 0o700); err != nil {
@@ -123,7 +123,7 @@ func TestResolveLinuxCrossMountCandidates_CanonicalizesAndMergesWritableAliases(
 	)
 	want := []linuxCrossMountCandidate{
 		{Path: target, Writable: true},
-		{Path: child},
+		{Path: child, Writable: true},
 	}
 	if !slices.Equal(got, want) {
 		t.Fatalf("resolveLinuxCrossMountCandidates() = %#v, want %#v", got, want)

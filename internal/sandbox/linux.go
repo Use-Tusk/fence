@@ -672,7 +672,8 @@ type linuxCrossMountCandidate struct {
 }
 
 // resolveLinuxCrossMountCandidates canonicalizes aliases before bwrap sees
-// them, merges duplicate access modes, and returns parents before descendants.
+// them, merges duplicate access modes, propagates writable parent grants to
+// descendants, and returns parents before descendants.
 func resolveLinuxCrossMountCandidates(paths []string, writablePaths map[string]bool) []linuxCrossMountCandidate {
 	var candidates []linuxCrossMountCandidate
 	indexByPath := make(map[string]int)
@@ -706,6 +707,20 @@ func resolveLinuxCrossMountCandidates(paths []string, writablePaths map[string]b
 		}
 		return strings.Compare(a.Path, b.Path)
 	})
+
+	var writableRoots []string
+	for i := range candidates {
+		if candidates[i].Writable {
+			writableRoots = append(writableRoots, candidates[i].Path)
+			continue
+		}
+		for _, root := range writableRoots {
+			if linuxPathContains(root, candidates[i].Path) {
+				candidates[i].Writable = true
+				break
+			}
+		}
+	}
 
 	return candidates
 }
