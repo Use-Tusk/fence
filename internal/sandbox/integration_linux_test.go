@@ -442,49 +442,71 @@ func TestLinux_GoBootstrap_RuntimeExecDenyCompletesWorkload(t *testing.T) {
 	assertContains(t, result.Stderr, "[fence:linux] Using Go-based Linux bootstrap")
 }
 
-func TestLinux_GoBootstrapSurvivesBusyBoxMulticallDeny(t *testing.T) {
+func TestLinux_GoBootstrapSurvivesMulticallDeny(t *testing.T) {
 	skipIfAlreadySandboxed(t)
-	skipIfCommandNotFound(t, "busybox")
 	skipIfCommandNotFound(t, "socat")
 
-	busyboxPath, err := exec.LookPath("busybox")
-	if err != nil {
-		t.Fatalf("resolve busybox: %v", err)
+	type multicallBinary struct {
+		name     string
+		path     string
+		resolved string
 	}
-	resolvedBusyboxPath, err := filepath.EvalSymlinks(busyboxPath)
-	if err != nil {
-		t.Fatalf("resolve busybox symlinks: %v", err)
+	var candidates []multicallBinary
+	for _, name := range []string{"coreutils", "busybox"} {
+		path, err := exec.LookPath(name)
+		if err != nil {
+			continue
+		}
+		resolved, err := filepath.EvalSymlinks(path)
+		if err != nil {
+			t.Fatalf("resolve %s symlinks: %v", name, err)
+		}
+		candidates = append(candidates, multicallBinary{
+			name:     name,
+			path:     path,
+			resolved: resolved,
+		})
 	}
-	aliasDir := t.TempDir()
-	if err := os.Symlink(busyboxPath, filepath.Join(aliasDir, "chroot")); err != nil {
-		t.Fatalf("create busybox chroot alias: %v", err)
+	if len(candidates) == 0 {
+		t.Skip("skipping: neither coreutils nor busybox multicall binary is installed")
 	}
-	t.Setenv("PATH", aliasDir+string(os.PathListSeparator)+os.Getenv("PATH"))
 
 	fenceBin := buildFenceCLIBinary(t)
 	workspace := createTempWorkspace(t)
-	cfg := testConfigWithWorkspace(workspace)
-	cfg.Command.Deny = []string{"chroot"}
-	cfg.Command.UseDefaults = boolPtr(false)
+	originalPath := os.Getenv("PATH")
 
-	configJSON, err := json.Marshal(cfg)
-	if err != nil {
-		t.Fatalf("marshal config: %v", err)
-	}
-	configPath := filepath.Join(t.TempDir(), "busybox-bootstrap.json")
-	if err := os.WriteFile(configPath, configJSON, 0o600); err != nil {
-		t.Fatalf("write config: %v", err)
-	}
+	for _, candidate := range candidates {
+		t.Run(candidate.name, func(t *testing.T) {
+			aliasDir := t.TempDir()
+			if err := os.Symlink(candidate.path, filepath.Join(aliasDir, "chroot")); err != nil {
+				t.Fatalf("create %s chroot alias: %v", candidate.name, err)
+			}
+			t.Setenv("PATH", aliasDir+string(os.PathListSeparator)+originalPath)
 
-	result := executeShellCommand(
-		t,
-		ShellQuote([]string{fenceBin, "--debug", "--settings", configPath, "--", "sh", "-c", "echo BUSYBOX_BOOTSTRAP_OK"}),
-		workspace,
-	)
-	assertAllowed(t, result)
-	assertContains(t, result.Stdout, "BUSYBOX_BOOTSTRAP_OK")
-	assertContains(t, result.Stderr, "[fence:linux] Using Go-based Linux bootstrap")
-	assertContains(t, result.Stderr, "--ro-bind /dev/null "+resolvedBusyboxPath)
+			cfg := testConfigWithWorkspace(workspace)
+			cfg.Command.Deny = []string{"chroot"}
+			cfg.Command.UseDefaults = boolPtr(false)
+
+			configJSON, err := json.Marshal(cfg)
+			if err != nil {
+				t.Fatalf("marshal config: %v", err)
+			}
+			configPath := filepath.Join(t.TempDir(), "multicall-bootstrap.json")
+			if err := os.WriteFile(configPath, configJSON, 0o600); err != nil {
+				t.Fatalf("write config: %v", err)
+			}
+
+			result := executeShellCommand(
+				t,
+				ShellQuote([]string{fenceBin, "--debug", "--settings", configPath, "--", "sh", "-c", "echo MULTICALL_BOOTSTRAP_OK"}),
+				workspace,
+			)
+			assertAllowed(t, result)
+			assertContains(t, result.Stdout, "MULTICALL_BOOTSTRAP_OK")
+			assertContains(t, result.Stderr, "[fence:linux] Using Go-based Linux bootstrap")
+			assertContains(t, result.Stderr, "--ro-bind /dev/null "+candidate.resolved)
+		})
+	}
 }
 
 func TestLinux_LibraryExplicitHelperUsesGoBootstrap(t *testing.T) {
