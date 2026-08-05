@@ -274,26 +274,34 @@ func containsCommandSubstitution(command string) bool {
 
 func isAlreadyFencedCommand(command, fenceExePath string) bool {
 	quotedFenceExePath := sandbox.ShellQuote([]string{fenceExePath})
-	prefixes := []string{
-		"fence ",
-		fenceExePath + " ",
-		quotedFenceExePath + " ",
+	executables := []string{
+		"fence",
+		fenceExePath,
+		quotedFenceExePath,
 	}
-	for _, prefix := range prefixes {
-		if strings.HasPrefix(command, prefix) {
+	for _, executable := range executables {
+		if hasShellWordPrefix(command, executable) {
 			return true
 		}
 	}
-	if command == "fence" || command == fenceExePath || command == quotedFenceExePath {
-		return true
-	}
 
-	args, ok := parseCanonicalShellArgs(command)
+	args, ok := parseCanonicalShellArgs(strings.ReplaceAll(command, "\t", " "))
 	if !ok {
 		return false
 	}
 	args = stripLiteralFenceLaunchers(args)
 	return len(args) > 0 && (args[0] == "fence" || args[0] == fenceExePath)
+}
+
+func hasShellWordPrefix(command, word string) bool {
+	if command == word {
+		return true
+	}
+	if !strings.HasPrefix(command, word) || len(command) == len(word) {
+		return false
+	}
+	next := command[len(word)]
+	return next == ' ' || next == '\t'
 }
 
 // stripLiteralFenceLaunchers handles common direct shell spellings
@@ -311,7 +319,14 @@ func stripLiteralFenceLaunchers(args []string) []string {
 			args = args[1:]
 			for len(args) > 0 {
 				switch {
-				case args[0] == "--" || args[0] == "-i":
+				case args[0] == "--" || args[0] == "-i" || args[0] == "--ignore-environment":
+					args = args[1:]
+				case envOptionConsumesNextArg(args[0]):
+					if len(args) < 2 {
+						return nil
+					}
+					args = args[2:]
+				case isInlineEnvOption(args[0]):
 					args = args[1:]
 				case !strings.HasPrefix(args[0], "-") && strings.Contains(args[0], "="):
 					args = args[1:]
@@ -324,6 +339,17 @@ func stripLiteralFenceLaunchers(args []string) []string {
 		}
 	}
 	return args
+}
+
+func envOptionConsumesNextArg(arg string) bool {
+	return arg == "-u" || arg == "--unset" || arg == "-C" || arg == "--chdir"
+}
+
+func isInlineEnvOption(arg string) bool {
+	return (strings.HasPrefix(arg, "-u") && len(arg) > len("-u")) ||
+		(strings.HasPrefix(arg, "-C") && len(arg) > len("-C")) ||
+		strings.HasPrefix(arg, "--unset=") ||
+		strings.HasPrefix(arg, "--chdir=")
 }
 
 func denyUntrustedFenceCommand(decision toolcall.Decision, fenceExePath string) toolcall.Decision {

@@ -49,7 +49,7 @@ func TestBuildCodexPreToolUseResponse_IntentOnlyDeniesEnvFenceWithDifferentPolic
 		"hook_event_name": "PreToolUse",
 		"tool_name": "Bash",
 		"tool_input": {
-			"command": "env fence --settings /tmp/weaker.json -c 'npm test'"
+			"command": "env -u FENCE_SANDBOX fence --settings /tmp/weaker.json -c 'npm test'"
 		}
 	}`
 
