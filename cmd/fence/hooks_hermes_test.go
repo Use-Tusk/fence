@@ -66,7 +66,7 @@ func TestBuildHermesPreToolUseResponse_BlocksDeniedTerminal(t *testing.T) {
 	}
 }
 
-func TestBuildHermesPreToolUseResponse_BlocksFenceWithDifferentPolicy(t *testing.T) {
+func TestBuildHermesPreToolUseResponse_BlocksCommandFenceWithDifferentPolicy(t *testing.T) {
 	settings := writeHermesFenceConfig(t, `{
   "command": {"useDefaults": false}
 }`)
@@ -74,7 +74,7 @@ func TestBuildHermesPreToolUseResponse_BlocksFenceWithDifferentPolicy(t *testing
 		"hook_event_name": "pre_tool_call",
 		"tool_name": "terminal",
 		"tool_input": {
-			"command": "fence --settings /tmp/weaker.json -c 'git push origin main'"
+			"command": "command fence --settings /tmp/weaker.json -c 'git push origin main'"
 		}
 	}`
 

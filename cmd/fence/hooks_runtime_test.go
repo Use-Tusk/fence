@@ -94,3 +94,28 @@ func TestIsTrustedFencedCommand(t *testing.T) {
 		})
 	}
 }
+
+func TestIsAlreadyFencedCommand_LiteralLaunchers(t *testing.T) {
+	fenceExePath := "/usr/local/bin/fence"
+	testCases := []struct {
+		name    string
+		command string
+		want    bool
+	}{
+		{name: "direct", command: "fence --settings weaker.json -c id", want: true},
+		{name: "env", command: "env fence --settings weaker.json -c id", want: true},
+		{name: "env options and assignment", command: "env -i MODE=test fence -c id", want: true},
+		{name: "command builtin", command: "command fence -c id", want: true},
+		{name: "command builtin path search", command: "command -p fence -c id", want: true},
+		{name: "command lookup", command: "command -v fence", want: false},
+		{name: "argument only", command: "echo fence", want: false},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := isAlreadyFencedCommand(tc.command, fenceExePath); got != tc.want {
+				t.Fatalf("isAlreadyFencedCommand() = %v, want %v for %q", got, tc.want, tc.command)
+			}
+		})
+	}
+}

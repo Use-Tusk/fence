@@ -33,7 +33,7 @@ func TestBuildCodexPreToolUseResponse_IntentOnlyAllowsUnblockedCommand(t *testin
 	}
 }
 
-func TestBuildCodexPreToolUseResponse_IntentOnlyDeniesFenceWithDifferentPolicy(t *testing.T) {
+func TestBuildCodexPreToolUseResponse_IntentOnlyDeniesEnvFenceWithDifferentPolicy(t *testing.T) {
 	t.Setenv(codexWrapEnvVar, "")
 
 	settingsPath := filepath.Join(t.TempDir(), "strict.json")
@@ -49,7 +49,7 @@ func TestBuildCodexPreToolUseResponse_IntentOnlyDeniesFenceWithDifferentPolicy(t
 		"hook_event_name": "PreToolUse",
 		"tool_name": "Bash",
 		"tool_input": {
-			"command": "fence --settings /tmp/weaker.json -c 'npm test'"
+			"command": "env fence --settings /tmp/weaker.json -c 'npm test'"
 		}
 	}`
 

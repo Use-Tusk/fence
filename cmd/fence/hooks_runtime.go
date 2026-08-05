@@ -279,14 +279,51 @@ func isAlreadyFencedCommand(command, fenceExePath string) bool {
 		fenceExePath + " ",
 		quotedFenceExePath + " ",
 	}
-
 	for _, prefix := range prefixes {
 		if strings.HasPrefix(command, prefix) {
 			return true
 		}
 	}
+	if command == "fence" || command == fenceExePath || command == quotedFenceExePath {
+		return true
+	}
 
-	return command == "fence" || command == fenceExePath || command == quotedFenceExePath
+	args, ok := parseCanonicalShellArgs(command)
+	if !ok {
+		return false
+	}
+	args = stripLiteralFenceLaunchers(args)
+	return len(args) > 0 && (args[0] == "fence" || args[0] == fenceExePath)
+}
+
+// stripLiteralFenceLaunchers handles common direct shell spellings
+// without being a complete shell interpreter. Intent-only hooks remain
+// best-effort against dynamic or indirect command construction.
+func stripLiteralFenceLaunchers(args []string) []string {
+	for len(args) > 0 {
+		switch args[0] {
+		case "command":
+			args = args[1:]
+			for len(args) > 0 && (args[0] == "-p" || args[0] == "--") {
+				args = args[1:]
+			}
+		case "env":
+			args = args[1:]
+			for len(args) > 0 {
+				switch {
+				case args[0] == "--" || args[0] == "-i":
+					args = args[1:]
+				case !strings.HasPrefix(args[0], "-") && strings.Contains(args[0], "="):
+					args = args[1:]
+				default:
+					return args
+				}
+			}
+		default:
+			return args
+		}
+	}
+	return args
 }
 
 func denyUntrustedFenceCommand(decision toolcall.Decision, fenceExePath string) toolcall.Decision {
