@@ -53,3 +53,44 @@ func TestIsPureCDCommand(t *testing.T) {
 		})
 	}
 }
+
+func TestIsTrustedFencedCommand(t *testing.T) {
+	fenceExePath := "/opt/Fence App/bin/fence"
+	extraFenceArgs := []string{"--settings", "/tmp/pinned policy.json"}
+	trusted := wrapShellCommand(`printf '%s\n' "hello world"`, fenceExePath, extraFenceArgs)
+
+	testCases := []struct {
+		name    string
+		command string
+		want    bool
+	}{
+		{
+			name:    "canonical wrapper",
+			command: trusted,
+			want:    true,
+		},
+		{
+			name:    "different settings",
+			command: wrapShellCommand("npm test", fenceExePath, []string{"--settings", "/tmp/weaker.json"}),
+			want:    false,
+		},
+		{
+			name:    "bare fence from path",
+			command: "fence --settings /tmp/weaker.json -c id",
+			want:    false,
+		},
+		{
+			name:    "trailing shell command",
+			command: trusted + " && id",
+			want:    false,
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := isTrustedFencedCommand(tc.command, fenceExePath, extraFenceArgs); got != tc.want {
+				t.Fatalf("isTrustedFencedCommand() = %v, want %v for %q", got, tc.want, tc.command)
+			}
+		})
+	}
+}

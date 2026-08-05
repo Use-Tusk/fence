@@ -96,6 +96,50 @@ func TestBuildClaudePreToolUseResponse_SkipsAlreadyFencedCommand(t *testing.T) {
 	}
 }
 
+func TestBuildClaudePreToolUseResponse_DeniesFenceWithDifferentPolicy(t *testing.T) {
+	t.Setenv(fenceSandboxEnvVar, "")
+
+	settingsPath := filepath.Join(t.TempDir(), "strict.json")
+	if err := os.WriteFile(settingsPath, []byte(`{
+  "command": {
+    "useDefaults": false
+  }
+}`), 0o600); err != nil {
+		t.Fatalf("os.WriteFile() error = %v", err)
+	}
+
+	input := `{
+		"hook_event_name": "PreToolUse",
+		"tool_name": "Bash",
+		"tool_input": {
+			"command": "fence --settings /tmp/weaker.json -c 'npm test'"
+		}
+	}`
+
+	response, changed, err := buildClaudePreToolUseResponse(
+		strings.NewReader(input),
+		"/usr/local/bin/fence",
+		[]string{"--settings", settingsPath},
+	)
+	if err != nil {
+		t.Fatalf("buildClaudePreToolUseResponse() error = %v", err)
+	}
+	if !changed {
+		t.Fatal("expected alternate-policy Fence command to be denied")
+	}
+
+	var decoded claudePreToolUseResponse
+	if err := json.Unmarshal(response, &decoded); err != nil {
+		t.Fatalf("json.Unmarshal() error = %v", err)
+	}
+	if decoded.HookSpecificOutput == nil {
+		t.Fatal("expected hookSpecificOutput in response")
+	}
+	if got := decoded.HookSpecificOutput.PermissionDecision; got != "deny" {
+		t.Fatalf("expected permissionDecision deny, got %q", got)
+	}
+}
+
 func TestBuildClaudePreToolUseResponse_IgnoresNonBashEvent(t *testing.T) {
 	input := `{
 		"hook_event_name": "PostToolUse",

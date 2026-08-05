@@ -58,6 +58,40 @@ func TestBuildWindsurfHookBlockMessage_BlocksDeniedRunCommand(t *testing.T) {
 	}
 }
 
+func TestBuildWindsurfHookBlockMessage_BlocksFenceWithDifferentPolicy(t *testing.T) {
+	settingsPath := filepath.Join(t.TempDir(), "fence.json")
+	content := `{
+  "command": {
+    "useDefaults": false
+  }
+}`
+	if err := os.WriteFile(settingsPath, []byte(content), 0o600); err != nil {
+		t.Fatalf("os.WriteFile() error = %v", err)
+	}
+
+	input := `{
+		"agent_action_name": "pre_run_command",
+		"tool_info": {
+			"command_line": "fence --settings /tmp/weaker.json -c 'gh repo create test'",
+			"cwd": "/tmp/repo"
+		}
+	}`
+
+	message, blocked, err := buildWindsurfHookBlockMessage(
+		strings.NewReader(input),
+		[]string{"--settings", settingsPath},
+	)
+	if err != nil {
+		t.Fatalf("buildWindsurfHookBlockMessage() error = %v", err)
+	}
+	if !blocked {
+		t.Fatal("expected alternate-policy Fence command to block")
+	}
+	if !strings.Contains(message, untrustedFenceCommandReason) {
+		t.Fatalf("expected nested-policy reason, got %q", message)
+	}
+}
+
 func TestBuildWindsurfHookBlockMessage_BlocksDeniedWritePath(t *testing.T) {
 	dir := t.TempDir()
 	settingsPath := filepath.Join(dir, "fence.json")

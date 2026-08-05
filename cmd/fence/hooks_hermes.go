@@ -82,6 +82,7 @@ func buildHermesPreToolUseResponse(stdin io.Reader, extraFenceArgs []string) ([]
 		Params:   event.ToolInput,
 		CWD:      cwd,
 	})
+	decision = denyUntrustedFenceCommand(decision, resolveFenceExecutable())
 
 	if decision.Outcome != toolcall.OutcomeDeny {
 		return nil, false, nil

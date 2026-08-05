@@ -96,6 +96,47 @@ func TestBuildCursorPreToolUseResponse_SkipsAlreadyFencedCommand(t *testing.T) {
 	}
 }
 
+func TestBuildCursorPreToolUseResponse_DeniesFenceWithDifferentPolicy(t *testing.T) {
+	t.Setenv(fenceSandboxEnvVar, "")
+
+	settingsPath := filepath.Join(t.TempDir(), "strict.json")
+	if err := os.WriteFile(settingsPath, []byte(`{
+  "command": {
+    "useDefaults": false
+  }
+}`), 0o600); err != nil {
+		t.Fatalf("os.WriteFile() error = %v", err)
+	}
+
+	input := `{
+		"hook_event_name": "preToolUse",
+		"tool_name": "Shell",
+		"tool_input": {
+			"command": "fence --settings /tmp/weaker.json -c 'npm test'"
+		}
+	}`
+
+	response, changed, err := buildCursorPreToolUseResponse(
+		strings.NewReader(input),
+		"/usr/local/bin/fence",
+		[]string{"--settings", settingsPath},
+	)
+	if err != nil {
+		t.Fatalf("buildCursorPreToolUseResponse() error = %v", err)
+	}
+	if !changed {
+		t.Fatal("expected alternate-policy Fence command to be denied")
+	}
+
+	var decoded cursorPreToolUseResponse
+	if err := json.Unmarshal(response, &decoded); err != nil {
+		t.Fatalf("json.Unmarshal() error = %v", err)
+	}
+	if decoded.Permission != "deny" {
+		t.Fatalf("expected permission deny, got %q", decoded.Permission)
+	}
+}
+
 func TestBuildCursorPreToolUseResponse_IgnoresNonShellEvent(t *testing.T) {
 	input := `{
 		"hook_event_name": "preToolUse",

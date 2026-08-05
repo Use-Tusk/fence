@@ -9,9 +9,12 @@ import (
 	"strings"
 
 	"github.com/fencesandbox/fence/internal/sandbox"
+	"github.com/fencesandbox/fence/internal/toolcall"
 )
 
 const fenceSandboxEnvVar = "FENCE_SANDBOX"
+
+const untrustedFenceCommandReason = "nested Fence command does not use the active hook policy"
 
 type hookFenceOptions struct {
 	SettingsPath string
@@ -29,6 +32,7 @@ type shellHookRequest struct {
 
 type shellHookResult struct {
 	Decision     hookShellDecision
+	Reason       string
 	UpdatedInput map[string]any
 }
 
@@ -82,7 +86,8 @@ func wrapShellCommand(command, fenceExePath string, extraFenceArgs []string) str
 }
 
 func evaluateShellHookRequest(request shellHookRequest, fenceExePath string, extraFenceArgs []string) (shellHookResult, bool, error) {
-	if shouldSkipShellWrap(request.Command, fenceExePath) {
+	trimmed := strings.TrimSpace(request.Command)
+	if trimmed == "" {
 		return shellHookResult{}, false, nil
 	}
 
@@ -92,6 +97,16 @@ func evaluateShellHookRequest(request shellHookRequest, fenceExePath string, ext
 	}
 	if blocked {
 		return shellHookResult{Decision: hookShellDeny}, true, nil
+	}
+
+	if isPureCDCommand(trimmed) || isTrustedFencedCommand(trimmed, fenceExePath, extraFenceArgs) {
+		return shellHookResult{}, false, nil
+	}
+	if isAlreadyFencedCommand(trimmed, fenceExePath) {
+		return shellHookResult{
+			Decision: hookShellDeny,
+			Reason:   untrustedFenceCommandReason,
+		}, true, nil
 	}
 
 	if os.Getenv(fenceSandboxEnvVar) == "1" {
@@ -198,17 +213,6 @@ func parseHookFenceOptionsArgs(args []string) (hookFenceOptions, error) {
 	return hookOptions.normalized()
 }
 
-func shouldSkipShellWrap(command, fenceExePath string) bool {
-	trimmed := strings.TrimSpace(command)
-	if trimmed == "" {
-		return true
-	}
-	if isPureCDCommand(trimmed) {
-		return true
-	}
-	return isAlreadyFencedCommand(trimmed, fenceExePath)
-}
-
 func isPureCDCommand(command string) bool {
 	if command != "cd" && !strings.HasPrefix(command, "cd ") && !strings.HasPrefix(command, "cd\t") {
 		return false
@@ -283,6 +287,77 @@ func isAlreadyFencedCommand(command, fenceExePath string) bool {
 	}
 
 	return command == "fence" || command == fenceExePath || command == quotedFenceExePath
+}
+
+func denyUntrustedFenceCommand(decision toolcall.Decision, fenceExePath string) toolcall.Decision {
+	if decision.Outcome != toolcall.OutcomeAllow || decision.Domain != toolcall.DomainCommand {
+		return decision
+	}
+	if !isAlreadyFencedCommand(strings.TrimSpace(decision.Value), fenceExePath) {
+		return decision
+	}
+
+	decision.Outcome = toolcall.OutcomeDeny
+	decision.Reason = untrustedFenceCommandReason
+	return decision
+}
+
+func isTrustedFencedCommand(command, fenceExePath string, extraFenceArgs []string) bool {
+	args, ok := parseCanonicalShellArgs(command)
+	if !ok || len(args) != len(extraFenceArgs)+3 {
+		return false
+	}
+	if args[0] != fenceExePath {
+		return false
+	}
+	for i, arg := range extraFenceArgs {
+		if args[i+1] != arg {
+			return false
+		}
+	}
+	return args[len(args)-2] == "-c"
+}
+
+// parseCanonicalShellArgs accepts only the literal shell syntax emitted by
+// sandbox.ShellQuote. Re-quoting the parsed argv rejects alternate spellings,
+// expansions, operators, and trailing shell commands.
+func parseCanonicalShellArgs(command string) ([]string, bool) {
+	var args []string
+	var current strings.Builder
+	var inSingleQuote bool
+	var escaped bool
+	var wordStarted bool
+
+	for _, c := range command {
+		switch {
+		case escaped:
+			current.WriteRune(c)
+			escaped = false
+			wordStarted = true
+		case c == '\\' && !inSingleQuote:
+			escaped = true
+			wordStarted = true
+		case c == '\'':
+			inSingleQuote = !inSingleQuote
+			wordStarted = true
+		case c == ' ' && !inSingleQuote:
+			if !wordStarted {
+				return nil, false
+			}
+			args = append(args, current.String())
+			current.Reset()
+			wordStarted = false
+		default:
+			current.WriteRune(c)
+			wordStarted = true
+		}
+	}
+
+	if escaped || inSingleQuote || !wordStarted {
+		return nil, false
+	}
+	args = append(args, current.String())
+	return args, sandbox.ShellQuote(args) == command
 }
 
 func cloneJSONMap(input map[string]any) map[string]any {

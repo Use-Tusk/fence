@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -133,6 +134,97 @@ func TestBuildOpencodePreToolUseResponse_SkipsAlreadyFencedCommand(t *testing.T)
 	}
 	if changed {
 		t.Fatal("expected already-fenced command to be skipped")
+	}
+}
+
+func TestBuildOpencodePreToolUseResponse_DeniesFenceWithDifferentPolicy(t *testing.T) {
+	t.Setenv(fenceSandboxEnvVar, "")
+
+	settingsPath := filepath.Join(t.TempDir(), "strict.json")
+	if err := os.WriteFile(settingsPath, []byte(`{
+  "command": {
+    "useDefaults": false
+  }
+}`), 0o600); err != nil {
+		t.Fatalf("os.WriteFile() error = %v", err)
+	}
+
+	input := `{
+		"hook_event_name": "PreToolUse",
+		"tool_name": "Bash",
+		"tool_input": {
+			"command": "fence --settings /tmp/weaker.json -c 'npm test'"
+		}
+	}`
+
+	response, changed, err := buildOpencodePreToolUseResponse(
+		strings.NewReader(input),
+		"/usr/local/bin/fence",
+		[]string{"--settings", settingsPath},
+	)
+	if err != nil {
+		t.Fatalf("buildOpencodePreToolUseResponse() error = %v", err)
+	}
+	if !changed {
+		t.Fatal("expected alternate-policy Fence command to be denied")
+	}
+
+	var decoded opencodePreToolUseResponse
+	if err := json.Unmarshal(response, &decoded); err != nil {
+		t.Fatalf("json.Unmarshal() error = %v", err)
+	}
+	if decoded.Decision != "deny" {
+		t.Fatalf("expected decision deny, got %q", decoded.Decision)
+	}
+	if decoded.Reason != untrustedFenceCommandReason {
+		t.Fatalf("expected nested-policy reason %q, got %q", untrustedFenceCommandReason, decoded.Reason)
+	}
+}
+
+func TestBuildOpencodePreToolUseResponse_ChecksPolicyBeforeTrustedWrapperShortcut(t *testing.T) {
+	t.Setenv(fenceSandboxEnvVar, "")
+
+	settingsPath := filepath.Join(t.TempDir(), "deny-fence.json")
+	if err := os.WriteFile(settingsPath, []byte(`{
+  "command": {
+    "deny": ["fence"],
+    "useDefaults": false
+  }
+}`), 0o600); err != nil {
+		t.Fatalf("os.WriteFile() error = %v", err)
+	}
+
+	command := sandbox.ShellQuote([]string{
+		"/usr/local/bin/fence",
+		"--settings", settingsPath,
+		"-c", "npm test",
+	})
+	input := fmt.Sprintf(`{
+		"hook_event_name": "PreToolUse",
+		"tool_name": "Bash",
+		"tool_input": {
+			"command": %q
+		}
+	}`, command)
+
+	response, changed, err := buildOpencodePreToolUseResponse(
+		strings.NewReader(input),
+		"/usr/local/bin/fence",
+		[]string{"--settings", settingsPath},
+	)
+	if err != nil {
+		t.Fatalf("buildOpencodePreToolUseResponse() error = %v", err)
+	}
+	if !changed {
+		t.Fatal("expected policy to deny canonical Fence wrapper")
+	}
+
+	var decoded opencodePreToolUseResponse
+	if err := json.Unmarshal(response, &decoded); err != nil {
+		t.Fatalf("json.Unmarshal() error = %v", err)
+	}
+	if decoded.Decision != "deny" {
+		t.Fatalf("expected decision deny, got %q", decoded.Decision)
 	}
 }
 

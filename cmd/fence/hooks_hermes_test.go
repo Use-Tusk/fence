@@ -66,6 +66,41 @@ func TestBuildHermesPreToolUseResponse_BlocksDeniedTerminal(t *testing.T) {
 	}
 }
 
+func TestBuildHermesPreToolUseResponse_BlocksFenceWithDifferentPolicy(t *testing.T) {
+	settings := writeHermesFenceConfig(t, `{
+  "command": {"useDefaults": false}
+}`)
+	input := `{
+		"hook_event_name": "pre_tool_call",
+		"tool_name": "terminal",
+		"tool_input": {
+			"command": "fence --settings /tmp/weaker.json -c 'git push origin main'"
+		}
+	}`
+
+	resp, changed, err := buildHermesPreToolUseResponse(
+		strings.NewReader(input),
+		[]string{"--settings", settings},
+	)
+	if err != nil {
+		t.Fatalf("buildHermesPreToolUseResponse: %v", err)
+	}
+	if !changed {
+		t.Fatal("expected alternate-policy Fence command to be blocked")
+	}
+
+	var decoded hermesPreToolUseResponse
+	if err := json.Unmarshal(resp, &decoded); err != nil {
+		t.Fatalf("Unmarshal: %v", err)
+	}
+	if decoded.Action != "block" {
+		t.Fatalf("expected action=block, got %q", decoded.Action)
+	}
+	if !strings.Contains(decoded.Message, untrustedFenceCommandReason) {
+		t.Fatalf("expected nested-policy reason, got %q", decoded.Message)
+	}
+}
+
 func TestBuildHermesPreToolUseResponse_BlocksDangerousWrite(t *testing.T) {
 	settings := writeHermesFenceConfig(t, `{
   "filesystem": {"allowWrite": ["/"]}

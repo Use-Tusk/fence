@@ -33,6 +33,53 @@ func TestBuildCodexPreToolUseResponse_IntentOnlyAllowsUnblockedCommand(t *testin
 	}
 }
 
+func TestBuildCodexPreToolUseResponse_IntentOnlyDeniesFenceWithDifferentPolicy(t *testing.T) {
+	t.Setenv(codexWrapEnvVar, "")
+
+	settingsPath := filepath.Join(t.TempDir(), "strict.json")
+	if err := os.WriteFile(settingsPath, []byte(`{
+  "command": {
+    "useDefaults": false
+  }
+}`), 0o600); err != nil {
+		t.Fatalf("os.WriteFile() error = %v", err)
+	}
+
+	input := `{
+		"hook_event_name": "PreToolUse",
+		"tool_name": "Bash",
+		"tool_input": {
+			"command": "fence --settings /tmp/weaker.json -c 'npm test'"
+		}
+	}`
+
+	response, changed, err := buildCodexPreToolUseResponse(
+		strings.NewReader(input),
+		"/usr/local/bin/fence",
+		[]string{"--settings", settingsPath},
+	)
+	if err != nil {
+		t.Fatalf("buildCodexPreToolUseResponse() error = %v", err)
+	}
+	if !changed {
+		t.Fatal("expected alternate-policy Fence command to be denied in intent-only mode")
+	}
+
+	var decoded codexPreToolUseResponse
+	if err := json.Unmarshal(response, &decoded); err != nil {
+		t.Fatalf("json.Unmarshal() error = %v", err)
+	}
+	if decoded.HookSpecificOutput == nil {
+		t.Fatal("expected hookSpecificOutput in response")
+	}
+	if got := decoded.HookSpecificOutput.PermissionDecision; got != "deny" {
+		t.Fatalf("expected permissionDecision deny, got %q", got)
+	}
+	if got := decoded.HookSpecificOutput.PermissionDecisionReason; got != untrustedFenceCommandReason {
+		t.Fatalf("expected nested-policy reason %q, got %q", untrustedFenceCommandReason, got)
+	}
+}
+
 func TestBuildCodexPreToolUseResponse_WrapsBashCommandWithWrapFlag(t *testing.T) {
 	t.Setenv(fenceSandboxEnvVar, "")
 	t.Setenv(codexWrapEnvVar, "")
