@@ -97,6 +97,39 @@ func TestResolvePathForMount_NonexistentPath(t *testing.T) {
 	}
 }
 
+func TestResolveLinuxCrossMountCandidates_CanonicalizesAndPropagatesWritableAliases(t *testing.T) {
+	tmpDir := t.TempDir()
+	target := filepath.Join(tmpDir, "target")
+	if err := os.Mkdir(target, 0o700); err != nil {
+		t.Fatalf("failed to create target directory: %v", err)
+	}
+	child := filepath.Join(target, "child")
+	if err := os.Mkdir(child, 0o700); err != nil {
+		t.Fatalf("failed to create child directory: %v", err)
+	}
+
+	alias := filepath.Join(tmpDir, "alias")
+	if err := os.Symlink(target, alias); err != nil {
+		t.Fatalf("failed to create absolute symlink: %v", err)
+	}
+	broken := filepath.Join(tmpDir, "broken")
+	if err := os.Symlink(filepath.Join(tmpDir, "missing"), broken); err != nil {
+		t.Fatalf("failed to create broken symlink: %v", err)
+	}
+
+	got := resolveLinuxCrossMountCandidates(
+		[]string{child, target, alias, broken},
+		map[string]bool{alias: true},
+	)
+	want := []linuxCrossMountCandidate{
+		{Path: target, Writable: true},
+		{Path: child, Writable: true},
+	}
+	if !slices.Equal(got, want) {
+		t.Fatalf("resolveLinuxCrossMountCandidates() = %#v, want %#v", got, want)
+	}
+}
+
 func TestExpandGlobPatterns_DoubleStarMatchesCurrentDirectory(t *testing.T) {
 	tmpDir := t.TempDir()
 	nestedDir := filepath.Join(tmpDir, "nested", "deeper")
