@@ -90,7 +90,10 @@ func buildOpencodePreToolUseResponse(stdin io.Reader, fenceExePath string, extra
 	switch result.Decision {
 	case hookShellDeny:
 		response.Decision = "deny"
-		response.Reason = opencodeDenyReason(command, extraFenceArgs)
+		response.Reason = result.Reason
+		if response.Reason == "" {
+			response.Reason = opencodeDenyReason(command, extraFenceArgs)
+		}
 	case hookShellWrap:
 		wrapped, ok := result.UpdatedInput["command"].(string)
 		if !ok {

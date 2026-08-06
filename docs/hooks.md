@@ -49,6 +49,12 @@ whether to:
 Commands that already violate Fence command policy are denied directly at hook
 time instead of being rewritten to a nested `fence -c ...` invocation.
 
+For command-rewriting integrations, the helper only treats the exact
+`fence -c ...` wrapper generated with its current executable and active policy
+arguments as already wrapped. All command-hook integrations deny an
+agent-supplied direct Fence command; this prevents alternate `--settings` or
+`--template` arguments from replacing the hook's policy.
+
 If the agent is already running inside Fence, the helper avoids launching a
 second nested sandbox and only applies Fence's command policy at hook time.
 

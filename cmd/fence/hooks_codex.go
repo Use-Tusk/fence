@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strings"
 
 	"github.com/fencesandbox/fence/internal/sandbox"
 )
@@ -83,7 +84,7 @@ func buildCodexPreToolUseResponse(stdin io.Reader, fenceExePath string, extraFen
 	cwd := extractHookCommandCWD(event.ToolInput, event.CWD)
 
 	if !codexAllowWrap(hookOptions) {
-		return buildCodexIntentOnlyResponse(command, cwd, wrapArgs)
+		return buildCodexIntentOnlyResponse(command, cwd, fenceExePath, wrapArgs)
 	}
 
 	result, changed, err := evaluateShellHookRequest(shellHookRequest{
@@ -104,7 +105,10 @@ func buildCodexPreToolUseResponse(stdin io.Reader, fenceExePath string, extraFen
 	switch result.Decision {
 	case hookShellDeny:
 		response.HookSpecificOutput.PermissionDecision = "deny"
-		response.HookSpecificOutput.PermissionDecisionReason = codexDenyReason(command, wrapArgs)
+		response.HookSpecificOutput.PermissionDecisionReason = result.Reason
+		if response.HookSpecificOutput.PermissionDecisionReason == "" {
+			response.HookSpecificOutput.PermissionDecisionReason = codexDenyReason(command, wrapArgs)
+		}
 	case hookShellWrap:
 		response.HookSpecificOutput.PermissionDecision = "allow"
 		response.HookSpecificOutput.UpdatedInput = result.UpdatedInput
@@ -119,12 +123,13 @@ func buildCodexPreToolUseResponse(stdin io.Reader, fenceExePath string, extraFen
 	return data, true, nil
 }
 
-// buildCodexIntentOnlyResponse denies blocked commands and otherwise leaves
-// the tool call unchanged. This is the default for Codex because tool
-// execution usually runs inside Codex's own sandbox, where nested fence -c
-// cannot bind its HTTP proxy.
-func buildCodexIntentOnlyResponse(command, cwd string, wrapArgs []string) ([]byte, bool, error) {
-	if shouldSkipShellWrap(command, resolveFenceExecutable()) {
+// buildCodexIntentOnlyResponse denies blocked commands and Fence invocations
+// that do not use the active hook policy. Other tool calls remain unchanged.
+// This is the default for Codex because tool execution usually runs inside
+// Codex's own sandbox, where nested fence -c cannot bind its HTTP proxy.
+func buildCodexIntentOnlyResponse(command, cwd, fenceExePath string, wrapArgs []string) ([]byte, bool, error) {
+	trimmed := strings.TrimSpace(command)
+	if trimmed == "" {
 		return nil, false, nil
 	}
 
@@ -132,14 +137,21 @@ func buildCodexIntentOnlyResponse(command, cwd string, wrapArgs []string) ([]byt
 	if err != nil {
 		return nil, false, err
 	}
-	if !blocked {
+	if !blocked && (isPureCDCommand(trimmed) || isTrustedFencedCommand(trimmed, fenceExePath, wrapArgs)) {
+		return nil, false, nil
+	}
+	if !blocked && !isAlreadyFencedCommand(trimmed, fenceExePath) {
 		return nil, false, nil
 	}
 
+	denyReason := codexDenyReason(command, wrapArgs)
+	if !blocked {
+		denyReason = untrustedFenceCommandReason
+	}
 	response := codexPreToolUseResponse{HookSpecificOutput: &codexPreToolUseHookSpecificOutput{
 		HookEventName:            "PreToolUse",
 		PermissionDecision:       "deny",
-		PermissionDecisionReason: codexDenyReason(command, wrapArgs),
+		PermissionDecisionReason: denyReason,
 	}}
 	data, err := json.Marshal(response)
 	if err != nil {

@@ -81,6 +81,7 @@ func buildWindsurfHookBlockMessage(stdin io.Reader, extraFenceArgs []string) (st
 		Params:   event.ToolInfo,
 		CWD:      cwd,
 	})
+	decision = denyUntrustedFenceCommand(decision, resolveFenceExecutable())
 	if decision.Outcome != toolcall.OutcomeDeny {
 		return "", false, nil
 	}
