@@ -116,6 +116,7 @@ func buildMacOSParamsForTest(cfg *config.Config) MacOSSandboxParams {
 		SOCKSProxyPort:          1080,
 		AllowUnixSockets:        cfg.Network.AllowUnixSockets,
 		AllowAllUnixSockets:     cfg.Network.AllowAllUnixSockets,
+		TMPDIRSocketPaths:       expandMacOSTmpPaths([]string{sandboxTMPDIR}),
 		AllowLocalBinding:       allowLocalBinding,
 		AllowLocalOutbound:      allowLocalOutbound,
 		MachLookup:              cfg.MacOS.Mach.Lookup,
@@ -419,6 +420,111 @@ func TestMacOS_ProfileNetworkSection(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// TestMacOS_TMPDIRSocketPathsInProfile verifies that the profile permits Unix socket
+// bind/connect under fence's own TMPDIR (/tmp/fence + /private/tmp/fence mirror)
+// when network is restricted. Fence redirects TMPDIR into this directory, so
+// sockets there must work without user config.
+func TestMacOS_TMPDIRSocketPathsInProfile(t *testing.T) {
+	tmpdirRules := []string{
+		`(allow network* (subpath "/tmp/fence"))`,
+		`(allow network* (subpath "/private/tmp/fence"))`,
+	}
+
+	tests := []struct {
+		name             string
+		restricted       bool
+		allowAllSockets  bool
+		tmpdirPaths      []string
+		allowUnixSockets []string
+		wantContains     []string
+		wantNotContain   []string
+	}{
+		{
+			name:           "restricted grants fence TMPDIR sockets",
+			restricted:     true,
+			tmpdirPaths:    []string{"/tmp/fence", "/private/tmp/fence"},
+			wantContains:   tmpdirRules,
+			wantNotContain: []string{"(allow network*)"},
+		},
+		{
+			name:           "relaxed network has no TMPDIR socket rules",
+			restricted:     false,
+			tmpdirPaths:    []string{"/tmp/fence", "/private/tmp/fence"},
+			wantContains:   []string{"(allow network*)"},
+			wantNotContain: tmpdirRules,
+		},
+		{
+			name:            "allowAllUnixSockets supersedes TMPDIR rules",
+			restricted:      true,
+			allowAllSockets: true,
+			tmpdirPaths:     []string{"/tmp/fence", "/private/tmp/fence"},
+			wantContains:    []string{`(allow network* (subpath "/"))`},
+			wantNotContain:  tmpdirRules,
+		},
+		{
+			name:             "empty TMPDIR paths keeps prior behavior",
+			restricted:       true,
+			allowUnixSockets: []string{"/var/run/docker.sock"},
+			wantContains:     []string{`(allow network* (subpath "/var/run/docker.sock"))`},
+			wantNotContain:   tmpdirRules,
+		},
+		{
+			name:         "dedupes exact duplicate TMPDIR rules",
+			restricted:   true,
+			tmpdirPaths:  []string{"/tmp/fence", "/tmp/fence"},
+			wantContains: []string{`(allow network* (subpath "/tmp/fence"))`},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			params := MacOSSandboxParams{
+				Command:                 "echo test",
+				NeedsNetworkRestriction: tt.restricted,
+				HTTPProxyPort:           8080,
+				SOCKSProxyPort:          1080,
+				TMPDIRSocketPaths:       tt.tmpdirPaths,
+				AllowUnixSockets:        tt.allowUnixSockets,
+				AllowAllUnixSockets:     tt.allowAllSockets,
+			}
+
+			profile := GenerateSandboxProfile(params)
+
+			for _, want := range tt.wantContains {
+				if strings.Count(profile, want) != 1 {
+					t.Errorf("profile should contain %q exactly once, got:\n%s", want, profile)
+				}
+			}
+			for _, notWant := range tt.wantNotContain {
+				if strings.Contains(profile, notWant) {
+					t.Errorf("profile should NOT contain %q:\n%s", notWant, profile)
+				}
+			}
+		})
+	}
+}
+
+// TestWrapCommandMacOS_AllowsUnixSocketsUnderOwnTMPDIR verifies the full wrap path:
+// WrapCommandMacOS populates TMPDIRSocketPaths from sandboxTMPDIR (+ /private/tmp
+// mirror), so the wrapped sandbox-exec profile permits AF_UNIX bind/connect under
+// the TMPDIR fence redirects processes into.
+func TestWrapCommandMacOS_AllowsUnixSocketsUnderOwnTMPDIR(t *testing.T) {
+	cfg := &config.Config{}
+	cmd, err := WrapCommandMacOS(cfg, "true", "", 0, 0, nil, nil, false, ShellModeDefault, false)
+	if err != nil {
+		t.Fatalf("WrapCommandMacOS: %v", err)
+	}
+
+	for _, rule := range []string{
+		`(allow network* (subpath "/tmp/fence"))`,
+		`(allow network* (subpath "/private/tmp/fence"))`,
+	} {
+		if !strings.Contains(cmd, rule) {
+			t.Errorf("wrapped command should contain %q (TMPDIR redirected into fence dir; sockets must be bindable there):\n%s", rule, cmd)
+		}
 	}
 }
 

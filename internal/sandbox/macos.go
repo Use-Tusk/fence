@@ -34,6 +34,7 @@ type MacOSSandboxParams struct {
 	SOCKSProxyPort          int
 	AllowUnixSockets        []string
 	AllowAllUnixSockets     bool
+	TMPDIRSocketPaths       []string
 	AllowLocalBinding       bool
 	AllowLocalOutbound      bool
 	MachLookup              []string
@@ -588,11 +589,29 @@ func GenerateSandboxProfile(params MacOSSandboxParams) string {
 		}
 
 		if params.AllowAllUnixSockets {
+			// Covers every Unix socket path, including fence's own TMPDIR.
 			profile.WriteString("(allow network* (subpath \"/\"))\n")
-		} else if len(params.AllowUnixSockets) > 0 {
+		} else {
+			// Fence redirects TMPDIR into its own directory (sandboxTMPDIR),
+			// so sandboxed processes must be able to bind/connect Unix sockets
+			// there. Emit literal paths: NormalizePath would collapse the
+			// /tmp -> /private/tmp symlink when the dir already exists, and both
+			// spellings are needed because resolution can fail when the dir does
+			// not exist yet (see expandMacOSTmpPaths).
+			emitted := make(map[string]bool)
+			for _, socketPath := range params.TMPDIRSocketPaths {
+				rule := fmt.Sprintf("(allow network* (subpath %s))", escapePath(socketPath))
+				if !emitted[rule] {
+					emitted[rule] = true
+					profile.WriteString(rule + "\n")
+				}
+			}
 			for _, socketPath := range params.AllowUnixSockets {
-				normalized := NormalizePath(socketPath)
-				fmt.Fprintf(&profile, "(allow network* (subpath %s))\n", escapePath(normalized))
+				rule := fmt.Sprintf("(allow network* (subpath %s))", escapePath(NormalizePath(socketPath)))
+				if !emitted[rule] {
+					emitted[rule] = true
+					profile.WriteString(rule + "\n")
+				}
 			}
 		}
 
@@ -729,6 +748,7 @@ func WrapCommandMacOS(cfg *config.Config, command string, workingDir string, htt
 		SOCKSProxyPort:          socksPort,
 		AllowUnixSockets:        cfg.Network.AllowUnixSockets,
 		AllowAllUnixSockets:     cfg.Network.AllowAllUnixSockets,
+		TMPDIRSocketPaths:       expandMacOSTmpPaths([]string{sandboxTMPDIR}),
 		AllowLocalBinding:       allowLocalBinding,
 		AllowLocalOutbound:      allowLocalOutbound,
 		MachLookup:              cfg.MacOS.Mach.Lookup,

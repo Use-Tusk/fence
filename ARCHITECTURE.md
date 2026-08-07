@@ -146,6 +146,11 @@ type Config struct {
   namespace (see [Outbound Connections to Host Loopback](#outbound-connections-to-host-loopback-localhost-bridge)).
 - On macOS, Unix socket access can be allowlisted with `allowUnixSockets` or
   fully opened with `allowAllUnixSockets`.
+- On macOS, fence's own TMPDIR (`/tmp/fence` and the `/private/tmp/fence`
+  mirror) is socket-enabled by default: `TMPDIR` is redirected there for every
+  sandboxed process, so AF_UNIX bind/connect under it must work without
+  configuration (matches Linux, where the private tmpfs + Landlock already
+  allow it).
 - On macOS, additional Mach/XPC permissions can be granted with
   `macos.mach.lookup` and `macos.mach.register`.
 - `allowedDomains: ["*"]` enables relaxed direct-network mode. Fence still
