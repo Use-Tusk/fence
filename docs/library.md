@@ -548,10 +548,13 @@ Semantics match wrap-mode enforcement:
 
 - **Writes**: mandatory dangerous-path protection, then `denyWrite`, then
   `allowWrite`, then default deny. An empty policy denies all writes.
-- **Reads**: `denyRead` always wins. Without `defaultDenyRead`, everything
-  else is readable. With `defaultDenyRead`, a path is readable when it
-  matches `allowRead`, `allowExecute`, `allowWrite` (which implies read), or
-  a default readable system path - unless `strictDenyRead` suppresses the
+- **Reads**: `denyRead` always wins on Linux (mount-level read masking). On
+  macOS, a specific `allowRead` re-allows a path inside a `denyRead` subtree
+  (seatbelt: specific allow beats wildcard deny); everything else in the
+  denied subtree stays blocked. Without `defaultDenyRead`, everything else is
+  readable. With `defaultDenyRead`, a path is readable when it matches
+  `allowRead`, `allowExecute`, `allowWrite` (which implies read), or a
+  default readable system path - unless `strictDenyRead` suppresses the
   system paths.
 
 Caveats: paths are evaluated lexically (no symlink resolution of the
