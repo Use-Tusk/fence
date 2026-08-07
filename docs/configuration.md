@@ -265,10 +265,13 @@ If you're unsure which services a tool needs, run with `-m` to surface blocked
 | `allowExecute` | Paths to allow executing only (Landlock: `READ_FILE + EXECUTE`, no directory listing) |
 | `defaultDenyRead` | If true, deny all filesystem reads by default. Only paths listed in `allowRead` (and essential system paths) remain readable. Use for strict read isolation. |
 | `strictDenyRead` | If true, suppress the default readable system paths that are normally added when `defaultDenyRead` is enabled. Only paths in `allowRead` will be readable. Implies `defaultDenyRead`. |
-| `denyRead` | Paths to deny reading (deny-only pattern) |
+| `denyRead` | Paths to deny reading (deny-only pattern). **macOS only** — Linux has no deny layer; read control is bind-mount visibility (see note below). |
 | `allowWrite` | Paths to allow writing (also grants read and execute) |
 | `denyWrite` | Paths to deny writing (takes precedence) |
 | `allowGitConfig` | Allow writes to `.git/config` files |
+
+> [!NOTE]
+> Platform semantics of `allowRead`/`denyRead`: `allowRead` is honored on both platforms — on Linux it is applied as read-only bind mounts under `defaultDenyRead`; on macOS it emits a seatbelt subpath/regex allow, which also re-allows a path inside a `denyRead` subtree (specific allow beats the wildcard deny). `denyRead` itself is macOS-only; on Linux it is ignored.
 
 ### Permission Tiers
 

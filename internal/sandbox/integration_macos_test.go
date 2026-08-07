@@ -167,6 +167,40 @@ func TestMacOS_SeatbeltBlocksDenyReadUnderDefaultDenyRead(t *testing.T) {
 	}
 }
 
+// TestMacOS_SeatbeltAllowReadOverridesDenyRead verifies end-to-end that in
+// permissive mode a user allowRead path is readable even when denyRead covers
+// its subtree, while sibling paths stay denied — the gpg-signing shape
+// (re-allow ~/.gnupg/pubring.kbx under ~/.gnupg/** deny). Uses synthetic files
+// in a temp dir so it is hermetic (no host ~/.gnupg dependence).
+func TestMacOS_SeatbeltAllowReadOverridesDenyRead(t *testing.T) {
+	skipIfAlreadySandboxed(t)
+
+	dir := t.TempDir()
+	pub := filepath.Join(dir, "pub.kbx")
+	secret := filepath.Join(dir, "secret.key")
+	if err := os.WriteFile(pub, []byte("PUB"), 0o600); err != nil {
+		t.Fatalf("write pub: %v", err)
+	}
+	if err := os.WriteFile(secret, []byte("KEY"), 0o600); err != nil {
+		t.Fatalf("write secret: %v", err)
+	}
+
+	cfg := testConfig()
+	cfg.Filesystem.AllowRead = []string{pub}
+	cfg.Filesystem.DenyRead = []string{filepath.Join(dir, "**")}
+
+	result := runUnderSandbox(t, cfg, "cat "+pub+" && echo READ_OK", dir)
+
+	assertAllowed(t, result)
+	if !strings.Contains(result.Stdout, "READ_OK") {
+		t.Errorf("expected allowRead path to be readable, got stdout: %q stderr: %q", result.Stdout, result.Stderr)
+	}
+
+	// Sibling under the same deny subtree stays blocked.
+	blocked := runUnderSandbox(t, cfg, "cat "+secret, dir)
+	assertBlocked(t, blocked)
+}
+
 // TestMacOS_SeatbeltBlocksWriteSystemFiles verifies system files cannot be written.
 func TestMacOS_SeatbeltBlocksWriteSystemFiles(t *testing.T) {
 	skipIfAlreadySandboxed(t)

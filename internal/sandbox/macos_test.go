@@ -783,6 +783,77 @@ func TestMacOS_DefaultDenyRead(t *testing.T) {
 	}
 }
 
+// TestGenerateReadRules_PermissiveAllowReadOverridesWildcardDeny verifies that
+// in permissive mode (defaultDenyRead=false) a user allowRead path is re-allowed
+// even under a denyRead subtree: the specific file-read-data/file-read-metadata
+// allows are emitted AFTER the wildcard deny, so the explicit grant wins.
+func TestGenerateReadRules_PermissiveAllowReadOverridesWildcardDeny(t *testing.T) {
+	rules := generateReadRules(
+		false, false,
+		[]string{"~/.gnupg/pubring.kbx"},
+		[]string{"~/.gnupg/**"},
+		"test-log",
+	)
+	profile := strings.Join(rules, "\n")
+
+	pub := escapePath(NormalizePath("~/.gnupg/pubring.kbx"))
+
+	for _, want := range []string{
+		"(allow file-read*)",                           // blanket
+		"(deny file-read*",                             // template deny (glob -> regex)
+		"(allow file-read-data\n  (subpath " + pub,     // override: data
+		"(allow file-read-metadata\n  (subpath " + pub, // override: metadata
+	} {
+		if !strings.Contains(profile, want) {
+			t.Errorf("expected %q in rules:\n%s", want, profile)
+		}
+	}
+
+	// Ordering: the specific allows must come AFTER the deny.
+	denyIdx := strings.Index(profile, "(deny file-read*")
+	allowDataIdx := strings.Index(profile, "(allow file-read-data\n  (subpath "+pub)
+	if denyIdx < 0 || allowDataIdx < 0 || allowDataIdx < denyIdx {
+		t.Errorf("allow file-read-data for %s must be emitted after the deny (deny@%d allow@%d):\n%s",
+			pub, denyIdx, allowDataIdx, profile)
+	}
+}
+
+// TestGenerateReadRules_PermissiveNoDenyKeepsProfileUnchanged verifies the
+// override is only emitted when a deny actually exists: with no denyRead, the
+// blanket allow already permits everything, so allowRead must not change the
+// profile (deny-free configs stay byte-identical to pre-fix output).
+func TestGenerateReadRules_PermissiveNoDenyKeepsProfileUnchanged(t *testing.T) {
+	withAllow := generateReadRules(false, false, []string{"~/.gnupg/pubring.kbx"}, nil, "log")
+	withoutAllow := generateReadRules(false, false, nil, nil, "log")
+
+	if strings.Join(withAllow, "\n") != strings.Join(withoutAllow, "\n") {
+		t.Errorf("allowRead must be a no-op when there is no denyRead:\nwith:    %v\nwithout: %v", withAllow, withoutAllow)
+	}
+}
+
+// TestGenerateReadRules_PermissiveAllowReadGlob verifies glob allowRead paths
+// produce regex allows (same op pair), matching the deny regex style.
+func TestGenerateReadRules_PermissiveAllowReadGlob(t *testing.T) {
+	rules := generateReadRules(false, false, []string{"/tmp/pub/*.kbx"}, []string{"/tmp/pub/**"}, "log")
+	profile := strings.Join(rules, "\n")
+
+	for _, op := range []string{"file-read-data", "file-read-metadata"} {
+		if !strings.Contains(profile, "(allow "+op+"\n  (regex #\"^/tmp/pub/[^/]*\\.kbx$\")") {
+			t.Errorf("expected regex allow for %s:\n%s", op, profile)
+		}
+	}
+}
+
+// TestGenerateReadRules_PermissiveAllowReadDeduplicates verifies repeated
+// allowRead entries emit a single rule set (seatbeltRuleBuilder dedupes).
+func TestGenerateReadRules_PermissiveAllowReadDeduplicates(t *testing.T) {
+	rules := generateReadRules(false, false, []string{"/x/a", "/x/a"}, []string{"/x/**"}, "log")
+	profile := strings.Join(rules, "\n")
+	if got := strings.Count(profile, "(allow file-read-data\n  (subpath \"/x/a\")"); got != 1 {
+		t.Errorf("expected exactly 1 file-read-data allow for /x/a, got %d:\n%s", got, profile)
+	}
+}
+
 func TestGlobToRegex_DoubleStarMatchesCurrentDirectory(t *testing.T) {
 	tests := []struct {
 		pattern string
