@@ -103,7 +103,7 @@ type FilesystemConfig struct {
 	WSLInterop      *bool    `json:"wslInterop,omitempty" description:"Controls access to the WSL interop binary on Windows Subsystem for Linux. If omitted, auto-detected: WSL environments allow /init, non-WSL environments do not."`
 	AllowRead       []string `json:"allowRead" description:"Additional filesystem paths the sandbox may read. Accepts absolute paths and glob patterns."`
 	AllowExecute    []string `json:"allowExecute" description:"Paths the sandbox may execute (grants read and execute permission, but not directory listing). Use for binaries that must be reachable but whose parent directories should not be browsable."`
-	DenyRead        []string `json:"denyRead" description:"Paths explicitly blocked from reading, even if they would otherwise be permitted by allowRead or system defaults."`
+	DenyRead        []string `json:"denyRead" description:"Paths explicitly blocked from reading, even if they would otherwise be permitted by allowRead or system defaults. macOS wrap-mode may re-allow a specific path via allowRead."`
 	AllowWrite      []string `json:"allowWrite" description:"Filesystem paths the sandbox may write to. Accepts absolute paths and glob patterns."`
 	DenyWrite       []string `json:"denyWrite" description:"Paths explicitly blocked from writing, even if they would otherwise be permitted by allowWrite."`
 	AllowGitConfig  bool     `json:"allowGitConfig,omitempty" description:"If true, allow read access to ~/.gitconfig and ~/.config/git. Enable when git operations inside the sandbox need the user's identity or settings."`
