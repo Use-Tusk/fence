@@ -49,9 +49,11 @@ func (e *PathBlockedError) Error() string {
 //
 // Adapters that want hook-mode to be permissive when filesystem policy is
 // unconfigured should ship a template (see internal/templates/hermes.json
-// for a worked example) rather than relaxing this predicate, keeping
-// hook-mode and wrap-mode semantics identical avoids a permanent
-// asymmetry between the two enforcement paths.
+// for a worked example) rather than relaxing this predicate. Write
+// semantics are identical in hook-mode and wrap-mode; read semantics have
+// one deliberate exception: macOS wrap-mode in permissive mode re-allows
+// explicit allowRead paths over a denyRead subtree (see CheckReadPath),
+// which hook-mode preflight intentionally does not reflect.
 func CheckWritePath(path string, cwd string, cfg *config.Config) error {
 	if cfg == nil {
 		cfg = config.Default()
