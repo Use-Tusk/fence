@@ -544,18 +544,22 @@ if err := fence.CheckWritePath(cfg, req.Path, req.CWD); err != nil {
 }
 ```
 
-Semantics match wrap-mode enforcement:
+These preflights are platform-agnostic; wrap-mode enforcement matches them
+for writes and for Linux reads, with one macOS exception (below):
 
 - **Writes**: mandatory dangerous-path protection, then `denyWrite`, then
   `allowWrite`, then default deny. An empty policy denies all writes.
-- **Reads**: `denyRead` always wins on Linux (mount-level read masking). On
-  macOS, a specific `allowRead` re-allows a path inside a `denyRead` subtree
-  (seatbelt: specific allow beats wildcard deny); everything else in the
-  denied subtree stays blocked. Without `defaultDenyRead`, everything else is
-  readable. With `defaultDenyRead`, a path is readable when it matches
-  `allowRead`, `allowExecute`, `allowWrite` (which implies read), or a
-  default readable system path - unless `strictDenyRead` suppresses the
-  system paths.
+- **Reads (preflight and Linux wrap-mode)**: `denyRead` always wins. Without
+  `defaultDenyRead`, everything else is readable. With `defaultDenyRead`, a
+  path is readable when it matches `allowRead`, `allowExecute`, `allowWrite`
+  (which implies read), or a default readable system path - unless
+  `strictDenyRead` suppresses the system paths.
+- **Reads (macOS wrap-mode seatbelt only)**: a specific `allowRead`
+  re-allows a path inside a `denyRead` subtree (specific allow beats
+  wildcard deny); everything else in the denied subtree stays blocked.
+  `CheckReadPath`/`CheckWritePath` do NOT reflect this override - they keep
+  `denyRead` always winning on all platforms, so preflight can report a path
+  blocked that macOS wrap-mode would allow.
 
 Caveats: paths are evaluated lexically (no symlink resolution of the
 target, no filesystem access), and only the config is consulted -

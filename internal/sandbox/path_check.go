@@ -77,9 +77,12 @@ func CheckWritePath(path string, cwd string, cfg *config.Config) error {
 }
 
 // CheckReadPath is the read-side policy predicate paralleling the wrap-mode
-// profile generators. Precedence mirrors wrap mode:
+// profile generators. It is intentionally platform-agnostic and keeps
+// denyRead always winning, even though macOS wrap-mode seatbelt re-allows
+// explicit allowRead paths inside a denyRead subtree (see generateReadRules)
+// - preflight does not reflect that override:
 //
-//  1. denyRead always wins, in both read modes.
+//  1. denyRead always wins, in both read modes, on all platforms.
 //  2. Without defaultDenyRead (read-mostly mode), everything else is
 //     readable.
 //  3. With defaultDenyRead (implied by strictDenyRead), a path is readable
