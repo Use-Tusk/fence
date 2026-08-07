@@ -175,8 +175,8 @@ type PathBlockedError = sandbox.PathBlockedError
 // strictDenyRead, allowRead, allowExecute, allowWrite-implies-read, and the
 // default readable system paths), but it does not sandbox anything and the
 // kernel-level sandbox remains authoritative. denyRead always wins here on
-// all platforms — macOS wrap-mode seatbelt additionally re-allows explicit
-// allowRead paths inside a denyRead subtree (see generateReadRules);
+// all platforms — macOS wrap-mode seatbelt (permissive mode only) re-allows
+// explicit allowRead paths inside a denyRead subtree (see generateReadRules);
 // preflight intentionally does not reflect that override. It evaluates the
 // declared path lexically and does not resolve symlinks on the target.
 //

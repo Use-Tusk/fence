@@ -271,7 +271,7 @@ If you're unsure which services a tool needs, run with `-m` to surface blocked
 | `allowGitConfig` | Allow writes to `.git/config` files |
 
 > [!NOTE]
-> Platform semantics of `allowRead`/`denyRead`: `allowRead` is honored on both platforms — on Linux it is applied as read-only bind mounts under `defaultDenyRead`; on macOS it emits a seatbelt subpath/regex allow. `denyRead` is enforced on both platforms — macOS seatbelt deny rule, Linux read masking (empty bind mount, deny wins over `allowRead`). The override of a `denyRead` subtree by `allowRead` (specific allow beats wildcard deny) is macOS-specific; on Linux `denyRead` wins at the mount level.
+> Platform semantics of `allowRead`/`denyRead`: `allowRead` is honored on both platforms — on Linux it is applied as read-only bind mounts under `defaultDenyRead`; on macOS it emits a seatbelt subpath/regex allow. `denyRead` is enforced on both platforms — macOS seatbelt deny rule, Linux read masking (empty bind mount, deny wins over `allowRead`). The override of a `denyRead` subtree by `allowRead` (specific allow beats wildcard deny) is macOS-specific AND permissive-mode only (`defaultDenyRead` off); with `defaultDenyRead`/`strictDenyRead`, and on Linux, `denyRead` wins.
 
 ### Permission Tiers
 

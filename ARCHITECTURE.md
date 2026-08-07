@@ -168,7 +168,7 @@ type Config struct {
   - `allowExecute` for tightly scoped executable paths
   - `allowRead` for readable/listable paths
   - `allowWrite` for writable paths (which also implies read/execute)
-- `denyRead` masks files or directories even if broader allow rules exist on Linux (mount-level masking, deny wins). On macOS wrap-mode, a specific `allowRead` re-allows a path inside a `denyRead` subtree (seatbelt: specific allow beats wildcard deny); preflight (`CheckReadPath`) stays denyRead-wins on all platforms.
+- `denyRead` masks files or directories even if broader allow rules exist on Linux (mount-level masking, deny wins). On macOS wrap-mode in permissive mode (`defaultDenyRead` off), a specific `allowRead` re-allows a path inside a `denyRead` subtree (seatbelt: specific allow beats wildcard deny); with `defaultDenyRead`/`strictDenyRead`, and in preflight (`CheckReadPath`), denyRead wins on all platforms.
 - `denyWrite` turns specific paths back into read-only.
 - Fence also applies mandatory dangerous-path protection independent of user
   config. This protects high-risk targets such as shell startup files, nested

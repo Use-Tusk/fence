@@ -554,12 +554,13 @@ for writes and for Linux reads, with one macOS exception (below):
   path is readable when it matches `allowRead`, `allowExecute`, `allowWrite`
   (which implies read), or a default readable system path - unless
   `strictDenyRead` suppresses the system paths.
-- **Reads (macOS wrap-mode seatbelt only)**: a specific `allowRead`
+- **Reads (macOS wrap-mode, permissive mode only)**: a specific `allowRead`
   re-allows a path inside a `denyRead` subtree (specific allow beats
-  wildcard deny); everything else in the denied subtree stays blocked.
-  `CheckReadPath`/`CheckWritePath` do NOT reflect this override - they keep
-  `denyRead` always winning on all platforms, so preflight can report a path
-  blocked that macOS wrap-mode would allow.
+  wildcard deny); everything else in the denied subtree stays blocked. With
+  `defaultDenyRead`/`strictDenyRead` the deny is emitted as specific ops and
+  `denyRead` wins. `CheckReadPath`/`CheckWritePath` do NOT reflect this
+  override - they keep `denyRead` always winning on all platforms, so
+  preflight can report a path blocked that macOS wrap-mode would allow.
 
 Caveats: paths are evaluated lexically (no symlink resolution of the
 target, no filesystem access), and only the config is consulted -
