@@ -1,6 +1,7 @@
 package sandbox
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -433,6 +434,15 @@ func TestMacOS_TMPDIRSocketPathsInProfile(t *testing.T) {
 		`(allow network* (subpath "/private/tmp/fence"))`,
 	}
 
+	// socketRule mirrors the prod emission: NormalizePath then escapePath. The
+	// expectation must be computed the same way because NormalizePath resolves
+	// symlinks when the path exists — e.g. on Linux CI /var/run/docker.sock
+	// resolves to /run/docker.sock (the GH runner has a real socket there), so
+	// a hardcoded "/var/run/docker.sock" expectation is platform-dependent.
+	socketRule := func(path string) string {
+		return fmt.Sprintf("(allow network* (subpath %s))", escapePath(NormalizePath(path)))
+	}
+
 	tests := []struct {
 		name             string
 		restricted       bool
@@ -468,7 +478,7 @@ func TestMacOS_TMPDIRSocketPathsInProfile(t *testing.T) {
 			name:             "empty TMPDIR paths keeps prior behavior",
 			restricted:       true,
 			allowUnixSockets: []string{"/var/run/docker.sock"},
-			wantContains:     []string{`(allow network* (subpath "/var/run/docker.sock"))`},
+			wantContains:     []string{socketRule("/var/run/docker.sock")},
 			wantNotContain:   tmpdirRules,
 		},
 		{
@@ -476,6 +486,26 @@ func TestMacOS_TMPDIRSocketPathsInProfile(t *testing.T) {
 			restricted:   true,
 			tmpdirPaths:  []string{"/tmp/fence", "/tmp/fence"},
 			wantContains: []string{`(allow network* (subpath "/tmp/fence"))`},
+		},
+		{
+			name:             "TMPDIR and allowUnixSockets rules coexist",
+			restricted:       true,
+			tmpdirPaths:      []string{"/tmp/fence", "/private/tmp/fence"},
+			allowUnixSockets: []string{"/var/run/docker.sock"},
+			wantContains:     append(append([]string{}, tmpdirRules...), socketRule("/var/run/docker.sock")),
+			wantNotContain:   []string{"(allow network*)"},
+		},
+		{
+			// A user path that normalizes onto a TMPDIR path must collapse to a
+			// single rule: on macOS NormalizePath("/tmp/fence") resolves the
+			// /tmp symlink to /private/tmp/fence (when it exists), on Linux it
+			// stays /tmp/fence — either way the emitted rule duplicates one the
+			// TMPDIR list already produced, and dedup must drop it.
+			name:             "dedupes allowUnixSockets overlap with TMPDIR paths",
+			restricted:       true,
+			tmpdirPaths:      []string{"/tmp/fence", "/private/tmp/fence"},
+			allowUnixSockets: []string{"/tmp/fence"},
+			wantContains:     tmpdirRules,
 		},
 	}
 
@@ -525,6 +555,30 @@ func TestWrapCommandMacOS_AllowsUnixSocketsUnderOwnTMPDIR(t *testing.T) {
 		if !strings.Contains(cmd, rule) {
 			t.Errorf("wrapped command should contain %q (TMPDIR redirected into fence dir; sockets must be bindable there):\n%s", rule, cmd)
 		}
+	}
+}
+
+// TestWrapCommandMacOS_AllowAllUnixSocketsSkipsTMPDIRRules verifies the wrap path
+// scoping: when AllowAllUnixSockets is set, the profile grants every Unix socket
+// path and must NOT emit redundant /tmp/fence subpath rules.
+func TestWrapCommandMacOS_AllowAllUnixSocketsSkipsTMPDIRRules(t *testing.T) {
+	cfg := &config.Config{}
+	cfg.Network.AllowAllUnixSockets = true
+	cmd, err := WrapCommandMacOS(cfg, "true", "", 0, 0, nil, nil, false, ShellModeDefault, false)
+	if err != nil {
+		t.Fatalf("WrapCommandMacOS: %v", err)
+	}
+
+	for _, rule := range []string{
+		`(allow network* (subpath "/tmp/fence"))`,
+		`(allow network* (subpath "/private/tmp/fence"))`,
+	} {
+		if strings.Contains(cmd, rule) {
+			t.Errorf("wrapped command should NOT contain %q when allowAllUnixSockets is set (subpath /\" covers everything):\n%s", rule, cmd)
+		}
+	}
+	if !strings.Contains(cmd, `(allow network* (subpath "/"))`) {
+		t.Errorf("wrapped command should contain the blanket unix-socket grant:\n%s", cmd)
 	}
 }
 

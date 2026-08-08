@@ -216,9 +216,25 @@ func TestMacOS_SeatbeltAllowsUnixSocketBindUnderTMPDIR(t *testing.T) {
 	// permit AF_UNIX bind there (this failed with `operation not permitted`
 	// before the TMPDIRSocketPaths grant). Unique per-run path: the socket file
 	// persists on the real host /tmp/fence (seatbelt does not overmount), so a
-	// fixed name would hit EADDRINUSE on the next run.
-	probe := "python3 -c \"import os,socket; s=socket.socket(socket.AF_UNIX); s.bind(os.environ['TMPDIR']+'/wx-'+str(os.getpid())+'.sock'); print('BOUND')\""
-	result := runUnderSandbox(t, cfg, probe, workspace)
+	// fixed name would hit EADDRINUSE on the next run. Use a UUID suffix and
+	// unlink the file after the bind so runs leave no debris behind.
+	pythonCode := `import os
+import socket
+import uuid
+
+path = os.path.join(os.environ["TMPDIR"], f"wx-{uuid.uuid4().hex}.sock")
+sock = socket.socket(socket.AF_UNIX)
+try:
+    sock.bind(path)
+    print("BOUND")
+finally:
+    sock.close()
+    try:
+        os.unlink(path)
+    except FileNotFoundError:
+        pass`
+
+	result := runUnderSandbox(t, cfg, `python3 -c '`+pythonCode+`'`, workspace)
 
 	assertAllowed(t, result)
 	if !strings.Contains(result.Stdout, "BOUND") {
