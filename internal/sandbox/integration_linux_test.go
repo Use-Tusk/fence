@@ -315,6 +315,30 @@ func TestLinux_LandlockAllowsTmpFence(t *testing.T) {
 	assertFileExists(t, testFile)
 }
 
+// TestLinux_LandlockAllowsUnixSocketBindUnderTMPDIR verifies a Unix socket can
+// be BOUND under /tmp/fence inside the Linux sandbox. Linux needs no seatbelt
+// grant: /tmp is a private writable tmpfs and Landlock's default /tmp rule
+// includes MAKE_SOCK. This pins that behavior (the parity claim for the macOS
+// TMPDIR socket fix) so it cannot regress silently.
+func TestLinux_LandlockAllowsUnixSocketBindUnderTMPDIR(t *testing.T) {
+	skipIfAlreadySandboxed(t)
+	skipIfLandlockNotUsable(t)
+	skipIfCommandNotFound(t, "python3")
+
+	workspace := createTempWorkspace(t)
+	cfg := testConfigWithWorkspace(workspace)
+
+	_ = os.MkdirAll("/tmp/fence", 0o750)
+
+	probe := "python3 -c \"import socket; s=socket.socket(socket.AF_UNIX); s.bind('/tmp/fence/wx.sock'); print('BOUND')\""
+	result := runUnderSandbox(t, cfg, probe, workspace)
+
+	assertAllowed(t, result)
+	if !strings.Contains(result.Stdout, "BOUND") {
+		t.Errorf("expected BOUND from sandboxed socket bind, got stdout: %q stderr: %q", result.Stdout, result.Stderr)
+	}
+}
+
 func TestLinux_LandlockWrapperPreservesRepoLocalFenceBinary(t *testing.T) {
 	skipIfAlreadySandboxed(t)
 

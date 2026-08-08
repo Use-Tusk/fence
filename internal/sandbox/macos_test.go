@@ -1,6 +1,7 @@
 package sandbox
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -116,6 +117,7 @@ func buildMacOSParamsForTest(cfg *config.Config) MacOSSandboxParams {
 		SOCKSProxyPort:          1080,
 		AllowUnixSockets:        cfg.Network.AllowUnixSockets,
 		AllowAllUnixSockets:     cfg.Network.AllowAllUnixSockets,
+		TMPDIRSocketPaths:       expandMacOSPathAliases([]string{sandboxTMPDIR}),
 		AllowLocalBinding:       allowLocalBinding,
 		AllowLocalOutbound:      allowLocalOutbound,
 		MachLookup:              cfg.MacOS.Mach.Lookup,
@@ -422,6 +424,282 @@ func TestMacOS_ProfileNetworkSection(t *testing.T) {
 	}
 }
 
+// TestMacOS_TMPDIRSocketPathsInProfile verifies that the profile permits Unix socket
+// bind/connect under fence's own TMPDIR (/tmp/fence + /private/tmp/fence mirror)
+// when network is restricted. Fence redirects TMPDIR into this directory, so
+// sockets there must work without user config.
+func TestMacOS_TMPDIRSocketPathsInProfile(t *testing.T) {
+	tmpdirRules := []string{
+		`(allow network* (subpath "/tmp/fence"))`,
+		`(allow network* (subpath "/private/tmp/fence"))`,
+	}
+
+	// socketRule mirrors the prod emission: NormalizePath then escapePath. The
+	// expectation must be computed the same way because NormalizePath resolves
+	// symlinks when the path exists — e.g. on Linux CI /var/run/docker.sock
+	// resolves to /run/docker.sock (the GH runner has a real socket there), so
+	// a hardcoded "/var/run/docker.sock" expectation is platform-dependent.
+	socketRule := func(path string) string {
+		return fmt.Sprintf("(allow network* (subpath %s))", escapePath(NormalizePath(path)))
+	}
+
+	tests := []struct {
+		name             string
+		restricted       bool
+		allowAllSockets  bool
+		tmpdirPaths      []string
+		allowUnixSockets []string
+		wantContains     []string
+		wantNotContain   []string
+	}{
+		{
+			name:           "restricted grants fence TMPDIR sockets",
+			restricted:     true,
+			tmpdirPaths:    []string{"/tmp/fence", "/private/tmp/fence"},
+			wantContains:   tmpdirRules,
+			wantNotContain: []string{"(allow network*)"},
+		},
+		{
+			name:           "relaxed network has no TMPDIR socket rules",
+			restricted:     false,
+			tmpdirPaths:    []string{"/tmp/fence", "/private/tmp/fence"},
+			wantContains:   []string{"(allow network*)"},
+			wantNotContain: tmpdirRules,
+		},
+		{
+			name:            "allowAllUnixSockets supersedes TMPDIR rules",
+			restricted:      true,
+			allowAllSockets: true,
+			tmpdirPaths:     []string{"/tmp/fence", "/private/tmp/fence"},
+			wantContains:    []string{`(allow network* (subpath "/"))`},
+			wantNotContain:  tmpdirRules,
+		},
+		{
+			name:             "empty TMPDIR paths keeps prior behavior",
+			restricted:       true,
+			allowUnixSockets: []string{"/var/run/docker.sock"},
+			wantContains:     []string{socketRule("/var/run/docker.sock")},
+			wantNotContain:   tmpdirRules,
+		},
+		{
+			name:         "dedupes exact duplicate TMPDIR rules",
+			restricted:   true,
+			tmpdirPaths:  []string{"/tmp/fence", "/tmp/fence"},
+			wantContains: []string{`(allow network* (subpath "/tmp/fence"))`},
+		},
+		{
+			name:             "TMPDIR and allowUnixSockets rules coexist",
+			restricted:       true,
+			tmpdirPaths:      []string{"/tmp/fence", "/private/tmp/fence"},
+			allowUnixSockets: []string{"/var/run/docker.sock"},
+			wantContains:     append(append([]string{}, tmpdirRules...), socketRule("/var/run/docker.sock")),
+			wantNotContain:   []string{"(allow network*)"},
+		},
+		{
+			// A user path that normalizes onto a TMPDIR path must collapse to a
+			// single rule: on macOS NormalizePath("/tmp/fence") resolves the
+			// /tmp symlink to /private/tmp/fence (when it exists), on Linux it
+			// stays /tmp/fence — either way the emitted rule duplicates one the
+			// TMPDIR list already produced, and dedup must drop it.
+			name:             "dedupes allowUnixSockets overlap with TMPDIR paths",
+			restricted:       true,
+			tmpdirPaths:      []string{"/tmp/fence", "/private/tmp/fence"},
+			allowUnixSockets: []string{"/tmp/fence"},
+			wantContains:     tmpdirRules,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			params := MacOSSandboxParams{
+				Command:                 "echo test",
+				NeedsNetworkRestriction: tt.restricted,
+				HTTPProxyPort:           8080,
+				SOCKSProxyPort:          1080,
+				TMPDIRSocketPaths:       tt.tmpdirPaths,
+				AllowUnixSockets:        tt.allowUnixSockets,
+				AllowAllUnixSockets:     tt.allowAllSockets,
+			}
+
+			profile := GenerateSandboxProfile(params)
+
+			for _, want := range tt.wantContains {
+				if strings.Count(profile, want) != 1 {
+					t.Errorf("profile should contain %q exactly once, got:\n%s", want, profile)
+				}
+			}
+			for _, notWant := range tt.wantNotContain {
+				if strings.Contains(profile, notWant) {
+					t.Errorf("profile should NOT contain %q:\n%s", notWant, profile)
+				}
+			}
+		})
+	}
+}
+
+// TestMacOS_TMPCanonicalizationInPathRules verifies that /tmp-prefixed read and
+// write path rules are emitted in BOTH the /tmp and /private/tmp spellings.
+// On macOS /tmp is a symlink to /private/tmp and seatbelt matches the
+// kernel-resolved path, so a rule with only the /tmp spelling is a silent no-op:
+// a denyRead glob under /tmp never denies, an allowWrite glob never allows.
+// NormalizePath skips EvalSymlinks for globs (and missing literals), so the
+// mirror must be added by string logic — exactly what expandMacOSPathAliases does.
+func TestMacOS_TMPCanonicalizationInPathRules(t *testing.T) {
+	profile := func(mut func(p *MacOSSandboxParams)) string {
+		p := MacOSSandboxParams{
+			Command:                 "echo test",
+			NeedsNetworkRestriction: true,
+			HTTPProxyPort:           8080,
+			SOCKSProxyPort:          1080,
+		}
+		mut(&p)
+		return GenerateSandboxProfile(p)
+	}
+
+	assertRegexRule := func(t *testing.T, prof, op, pattern string) {
+		t.Helper()
+		// Mirror buildFileSystemRegexRule exactly: it renders `(op\n  (regex
+		// #"..."))` escaping only double quotes — NOT backslashes. %q would
+		// double-escape regex metachars like `\.` and never match.
+		regex := GlobToRegex(pattern)
+		want := fmt.Sprintf("(%s\n  (regex #\"%s\")", op, strings.ReplaceAll(regex, `"`, `\"`))
+		if strings.Count(prof, want) != 1 {
+			t.Errorf("expected %q exactly once in profile:\n%s", want, prof)
+		}
+	}
+
+	t.Run("denyRead glob under /tmp emits both spellings", func(t *testing.T) {
+		prof := profile(func(p *MacOSSandboxParams) { p.ReadDenyPaths = []string{"/tmp/fence-df/**"} })
+		assertRegexRule(t, prof, "deny file-read*", "/tmp/fence-df/**")
+		assertRegexRule(t, prof, "deny file-read*", "/private/tmp/fence-df/**")
+	})
+
+	t.Run("denyRead glob under /tmp in defaultDenyRead mode", func(t *testing.T) {
+		prof := profile(func(p *MacOSSandboxParams) {
+			p.DefaultDenyRead = true
+			p.ReadDenyPaths = []string{"/tmp/fence-df/**"}
+		})
+		// defaultDenyRead additionally denies file-read-data and file-read-metadata.
+		assertRegexRule(t, prof, "deny file-read-data", "/tmp/fence-df/**")
+		assertRegexRule(t, prof, "deny file-read-data", "/private/tmp/fence-df/**")
+	})
+
+	t.Run("allowRead glob under /tmp emits both spellings", func(t *testing.T) {
+		prof := profile(func(p *MacOSSandboxParams) {
+			p.DefaultDenyRead = true
+			p.ReadAllowPaths = []string{"/tmp/fence-df/**"}
+		})
+		assertRegexRule(t, prof, "allow file-read-data", "/tmp/fence-df/**")
+		assertRegexRule(t, prof, "allow file-read-data", "/private/tmp/fence-df/**")
+	})
+
+	t.Run("denyWrite glob under /tmp emits both spellings", func(t *testing.T) {
+		prof := profile(func(p *MacOSSandboxParams) { p.WriteDenyPaths = []string{"/tmp/fence-df/**"} })
+		assertRegexRule(t, prof, "deny file-write*", "/tmp/fence-df/**")
+		assertRegexRule(t, prof, "deny file-write*", "/private/tmp/fence-df/**")
+	})
+
+	t.Run("allowWrite glob under /tmp emits both spellings", func(t *testing.T) {
+		prof := profile(func(p *MacOSSandboxParams) { p.WriteAllowPaths = []string{"/tmp/fence-df/**"} })
+		assertRegexRule(t, prof, "allow file-write*", "/tmp/fence-df/**")
+		assertRegexRule(t, prof, "allow file-write*", "/private/tmp/fence-df/**")
+	})
+
+	t.Run("literal deny under /tmp emits both subpath spellings", func(t *testing.T) {
+		prof := profile(func(p *MacOSSandboxParams) { p.ReadDenyPaths = []string{"/tmp/fence-df"} })
+		for _, want := range []string{
+			`(deny file-read*`,
+			`  (subpath "/tmp/fence-df")`,
+			`  (subpath "/private/tmp/fence-df")`,
+		} {
+			if !strings.Contains(prof, want) {
+				t.Errorf("expected %q in profile:\n%s", want, prof)
+			}
+		}
+	})
+
+	t.Run("move-blocking unlink rules cover both spellings", func(t *testing.T) {
+		prof := profile(func(p *MacOSSandboxParams) { p.WriteDenyPaths = []string{"/tmp/fence-df/**"} })
+		assertRegexRule(t, prof, "deny file-write-unlink", "/tmp/fence-df/**")
+		assertRegexRule(t, prof, "deny file-write-unlink", "/private/tmp/fence-df/**")
+		for _, want := range []string{
+			`(literal "/tmp/fence-df")`,
+			`(literal "/private/tmp/fence-df")`,
+		} {
+			if !strings.Contains(prof, want) {
+				t.Errorf("expected %q in profile (move-block base dir):\n%s", want, prof)
+			}
+		}
+	})
+
+	t.Run("non-tmp paths stay single-spelling", func(t *testing.T) {
+		prof := profile(func(p *MacOSSandboxParams) { p.ReadDenyPaths = []string{"/home/user/secret/**"} })
+		assertRegexRule(t, prof, "deny file-read*", "/home/user/secret/**")
+		if strings.Contains(prof, "private/tmp") {
+			t.Errorf("non-tmp deny leaked a /private/tmp variant:\n%s", prof)
+		}
+	})
+
+	t.Run("denyRead glob under /var emits both spellings", func(t *testing.T) {
+		// macOS aliases /var -> /private/var (real TMPDIR is /var/folders/...),
+		// so /var-prefixed globs need the same dual-spelling treatment as /tmp.
+		prof := profile(func(p *MacOSSandboxParams) { p.ReadDenyPaths = []string{"/var/folders/fence/**"} })
+		assertRegexRule(t, prof, "deny file-read*", "/var/folders/fence/**")
+		assertRegexRule(t, prof, "deny file-read*", "/private/var/folders/fence/**")
+	})
+
+	t.Run("denyRead glob under /etc emits both spellings", func(t *testing.T) {
+		prof := profile(func(p *MacOSSandboxParams) { p.ReadDenyPaths = []string{"/etc/fence/**"} })
+		assertRegexRule(t, prof, "deny file-read*", "/etc/fence/**")
+		assertRegexRule(t, prof, "deny file-read*", "/private/etc/fence/**")
+	})
+}
+
+// TestWrapCommandMacOS_AllowsUnixSocketsUnderOwnTMPDIR verifies the full wrap path:
+// WrapCommandMacOS populates TMPDIRSocketPaths from sandboxTMPDIR (+ /private/tmp
+// mirror), so the wrapped sandbox-exec profile permits AF_UNIX bind/connect under
+// the TMPDIR fence redirects processes into.
+func TestWrapCommandMacOS_AllowsUnixSocketsUnderOwnTMPDIR(t *testing.T) {
+	cfg := &config.Config{}
+	cmd, err := WrapCommandMacOS(cfg, "true", "", 0, 0, nil, nil, false, ShellModeDefault, false)
+	if err != nil {
+		t.Fatalf("WrapCommandMacOS: %v", err)
+	}
+
+	for _, rule := range []string{
+		`(allow network* (subpath "/tmp/fence"))`,
+		`(allow network* (subpath "/private/tmp/fence"))`,
+	} {
+		if !strings.Contains(cmd, rule) {
+			t.Errorf("wrapped command should contain %q (TMPDIR redirected into fence dir; sockets must be bindable there):\n%s", rule, cmd)
+		}
+	}
+}
+
+// TestWrapCommandMacOS_AllowAllUnixSocketsSkipsTMPDIRRules verifies the wrap path
+// scoping: when AllowAllUnixSockets is set, the profile grants every Unix socket
+// path and must NOT emit redundant /tmp/fence subpath rules.
+func TestWrapCommandMacOS_AllowAllUnixSocketsSkipsTMPDIRRules(t *testing.T) {
+	cfg := &config.Config{}
+	cfg.Network.AllowAllUnixSockets = true
+	cmd, err := WrapCommandMacOS(cfg, "true", "", 0, 0, nil, nil, false, ShellModeDefault, false)
+	if err != nil {
+		t.Fatalf("WrapCommandMacOS: %v", err)
+	}
+
+	for _, rule := range []string{
+		`(allow network* (subpath "/tmp/fence"))`,
+		`(allow network* (subpath "/private/tmp/fence"))`,
+	} {
+		if strings.Contains(cmd, rule) {
+			t.Errorf("wrapped command should NOT contain %q when allowAllUnixSockets is set (subpath /\" covers everything):\n%s", rule, cmd)
+		}
+	}
+	if !strings.Contains(cmd, `(allow network* (subpath "/"))`) {
+		t.Errorf("wrapped command should contain the blanket unix-socket grant:\n%s", cmd)
+	}
+}
+
 // TestMacOS_DefaultDenyRead verifies that the defaultDenyRead option properly restricts filesystem reads.
 func TestMacOS_DefaultDenyRead(t *testing.T) {
 	tests := []struct {
@@ -546,7 +824,7 @@ func TestGlobToRegex_DoubleStarMatchesCurrentDirectory(t *testing.T) {
 }
 
 // TestExpandMacOSTmpPaths verifies that /tmp and /private/tmp paths are properly mirrored.
-func TestExpandMacOSTmpPaths(t *testing.T) {
+func TestExpandMacOSPathAliases(t *testing.T) {
 	tests := []struct {
 		name  string
 		input []string
@@ -592,20 +870,45 @@ func TestExpandMacOSTmpPaths(t *testing.T) {
 			input: []string{".", "/tmp/fence", "/private/tmp/fence"},
 			want:  []string{".", "/tmp/fence", "/private/tmp/fence"},
 		},
+		{
+			name:  "mirrors /var/folders to /private/var/folders",
+			input: []string{".", "/var/folders"},
+			want:  []string{".", "/var/folders", "/private/var/folders"},
+		},
+		{
+			name:  "mirrors /private/var to /var",
+			input: []string{".", "/private/var"},
+			want:  []string{".", "/private/var", "/var"},
+		},
+		{
+			name:  "mirrors /var/tmp/foo to /private/var/tmp/foo",
+			input: []string{".", "/var/tmp/foo"},
+			want:  []string{".", "/var/tmp/foo", "/private/var/tmp/foo"},
+		},
+		{
+			name:  "mirrors /etc/hosts to /private/etc/hosts",
+			input: []string{".", "/etc/hosts"},
+			want:  []string{".", "/etc/hosts", "/private/etc/hosts"},
+		},
+		{
+			name:  "no cross-alias confusion between /tmp and /var",
+			input: []string{".", "/tmp/var"},
+			want:  []string{".", "/tmp/var", "/private/tmp/var"},
+		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := expandMacOSTmpPaths(tt.input)
+			got := expandMacOSPathAliases(tt.input)
 
 			if len(got) != len(tt.want) {
-				t.Errorf("expandMacOSTmpPaths() = %v, want %v", got, tt.want)
+				t.Errorf("expandMacOSPathAliases() = %v, want %v", got, tt.want)
 				return
 			}
 
 			for i, v := range got {
 				if v != tt.want[i] {
-					t.Errorf("expandMacOSTmpPaths()[%d] = %v, want %v", i, v, tt.want[i])
+					t.Errorf("expandMacOSPathAliases()[%d] = %v, want %v", i, v, tt.want[i])
 				}
 			}
 		})

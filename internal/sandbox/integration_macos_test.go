@@ -200,6 +200,64 @@ func TestMacOS_SeatbeltAllowsTmpFence(t *testing.T) {
 	assertFileExists(t, testFile)
 }
 
+// TestMacOS_SeatbeltAllowsUnixSocketBindUnderTMPDIR verifies a Unix socket can
+// actually be BOUND inside fence's own TMPDIR (/tmp/fence). Fence redirects
+// TMPDIR there for every sandboxed process, so sockets must work without user
+// config — this exercises the TMPDIRSocketPaths seatbelt grant end-to-end,
+// mirroring the relay listener test but under the fence-owned path.
+func TestMacOS_SeatbeltAllowsUnixSocketBindUnderTMPDIR(t *testing.T) {
+	skipIfAlreadySandboxed(t)
+	skipIfCommandNotFound(t, "python3")
+
+	workspace := createTempWorkspace(t)
+	cfg := testConfigWithWorkspace(workspace)
+
+	// TMPDIR is redirected to /tmp/fence by the sandbox env; the profile must
+	// permit AF_UNIX bind there (this failed with `operation not permitted`
+	// before the TMPDIRSocketPaths grant). Unique per-run path: the socket file
+	// persists on the real host /tmp/fence (seatbelt does not overmount), so a
+	// fixed name would hit EADDRINUSE on the next run. Use a UUID suffix and
+	// unlink the file after the bind so runs leave no debris behind.
+	pythonCode := `import os
+import socket
+import uuid
+
+path = os.path.join(os.environ["TMPDIR"], f"wx-{uuid.uuid4().hex}.sock")
+sock = socket.socket(socket.AF_UNIX)
+try:
+    sock.bind(path)
+    print("BOUND")
+finally:
+    sock.close()
+    try:
+        os.unlink(path)
+    except FileNotFoundError:
+        pass`
+
+	result := runUnderSandbox(t, cfg, `python3 -c '`+pythonCode+`'`, workspace)
+
+	assertAllowed(t, result)
+	if !strings.Contains(result.Stdout, "BOUND") {
+		t.Errorf("expected BOUND from sandboxed socket bind, got stdout: %q stderr: %q", result.Stdout, result.Stderr)
+	}
+}
+
+// TestMacOS_SeatbeltBlocksUnixSocketBindOutsideTMPDIR verifies the grant is
+// scoped: a Unix socket bind directly under /tmp (not under /tmp/fence) stays
+// blocked, so the fix does not over-grant host temp paths.
+func TestMacOS_SeatbeltBlocksUnixSocketBindOutsideTMPDIR(t *testing.T) {
+	skipIfAlreadySandboxed(t)
+	skipIfCommandNotFound(t, "python3")
+
+	workspace := createTempWorkspace(t)
+	cfg := testConfigWithWorkspace(workspace)
+
+	probe := "python3 -c \"import os,socket; s=socket.socket(socket.AF_UNIX); s.bind('/tmp/fence-sock-test-'+str(os.getpid())+'.sock'); print('BOUND')\""
+	result := runUnderSandbox(t, cfg, probe, workspace)
+
+	assertBlocked(t, result)
+}
+
 // ============================================================================
 // Network Blocking Tests
 // ============================================================================
