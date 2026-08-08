@@ -318,19 +318,25 @@ func generateReadRules(defaultDenyRead, strictDenyRead bool, allowPaths, denyPat
 	// rules would be pure noise (deny-free profiles stay byte-identical).
 	if !defaultDenyRead && len(denyPaths) > 0 {
 		for _, pathPattern := range allowPaths {
-			normalized := NormalizePath(pathPattern)
-			regex := ""
-			if ContainsGlobChars(normalized) {
-				regex = GlobToRegex(normalized)
-			}
-			for _, op := range []string{"file-read-data", "file-read-metadata"} {
-				if regex != "" {
-					builder.addRule(buildFileSystemRegexRule("allow "+op, regex, ""))
-				} else {
-					builder.addRule(
-						"(allow "+op,
-						fmt.Sprintf("  (subpath %s))", escapePath(normalized)),
-					)
+			// Emit both /tmp,/var,/etc and /private/* spellings so the re-allow
+			// matches the kernel-resolved path (see seatbeltPathSpellings). The
+			// deny loop already emits both; without this, an allowRead override
+			// under /var or /etc (glob or not-yet-existing literal) silently
+			// misses and the deny wins.
+			for _, normalized := range seatbeltPathSpellings(pathPattern) {
+				regex := ""
+				if ContainsGlobChars(normalized) {
+					regex = GlobToRegex(normalized)
+				}
+				for _, op := range []string{"file-read-data", "file-read-metadata"} {
+					if regex != "" {
+						builder.addRule(buildFileSystemRegexRule("allow "+op, regex, ""))
+					} else {
+						builder.addRule(
+							"(allow "+op,
+							fmt.Sprintf("  (subpath %s))", escapePath(normalized)),
+						)
+					}
 				}
 			}
 		}
