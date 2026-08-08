@@ -537,6 +537,108 @@ func TestMacOS_TMPDIRSocketPathsInProfile(t *testing.T) {
 	}
 }
 
+// TestMacOS_TMPCanonicalizationInPathRules verifies that /tmp-prefixed read and
+// write path rules are emitted in BOTH the /tmp and /private/tmp spellings.
+// On macOS /tmp is a symlink to /private/tmp and seatbelt matches the
+// kernel-resolved path, so a rule with only the /tmp spelling is a silent no-op:
+// a denyRead glob under /tmp never denies, an allowWrite glob never allows.
+// NormalizePath skips EvalSymlinks for globs (and missing literals), so the
+// mirror must be added by string logic — exactly what expandMacOSTmpPaths does.
+func TestMacOS_TMPCanonicalizationInPathRules(t *testing.T) {
+	profile := func(mut func(p *MacOSSandboxParams)) string {
+		p := MacOSSandboxParams{
+			Command:                 "echo test",
+			NeedsNetworkRestriction: true,
+			HTTPProxyPort:           8080,
+			SOCKSProxyPort:          1080,
+		}
+		mut(&p)
+		return GenerateSandboxProfile(p)
+	}
+
+	assertRegexRule := func(t *testing.T, prof, op, pattern string) {
+		t.Helper()
+		// buildFileSystemRegexRule renders `(op\n  (regex #"..."))`; GlobToRegex
+		// output contains no quotes so the %q quoting matches the profile.
+		want := fmt.Sprintf("(%s\n  (regex #%q)", op, GlobToRegex(pattern))
+		if strings.Count(prof, want) != 1 {
+			t.Errorf("expected %q exactly once in profile:\n%s", want, prof)
+		}
+	}
+
+	t.Run("denyRead glob under /tmp emits both spellings", func(t *testing.T) {
+		prof := profile(func(p *MacOSSandboxParams) { p.ReadDenyPaths = []string{"/tmp/fence-df/**"} })
+		assertRegexRule(t, prof, "deny file-read*", "/tmp/fence-df/**")
+		assertRegexRule(t, prof, "deny file-read*", "/private/tmp/fence-df/**")
+	})
+
+	t.Run("denyRead glob under /tmp in defaultDenyRead mode", func(t *testing.T) {
+		prof := profile(func(p *MacOSSandboxParams) {
+			p.DefaultDenyRead = true
+			p.ReadDenyPaths = []string{"/tmp/fence-df/**"}
+		})
+		// defaultDenyRead additionally denies file-read-data and file-read-metadata.
+		assertRegexRule(t, prof, "deny file-read-data", "/tmp/fence-df/**")
+		assertRegexRule(t, prof, "deny file-read-data", "/private/tmp/fence-df/**")
+	})
+
+	t.Run("allowRead glob under /tmp emits both spellings", func(t *testing.T) {
+		prof := profile(func(p *MacOSSandboxParams) {
+			p.DefaultDenyRead = true
+			p.ReadAllowPaths = []string{"/tmp/fence-df/**"}
+		})
+		assertRegexRule(t, prof, "allow file-read-data", "/tmp/fence-df/**")
+		assertRegexRule(t, prof, "allow file-read-data", "/private/tmp/fence-df/**")
+	})
+
+	t.Run("denyWrite glob under /tmp emits both spellings", func(t *testing.T) {
+		prof := profile(func(p *MacOSSandboxParams) { p.WriteDenyPaths = []string{"/tmp/fence-df/**"} })
+		assertRegexRule(t, prof, "deny file-write*", "/tmp/fence-df/**")
+		assertRegexRule(t, prof, "deny file-write*", "/private/tmp/fence-df/**")
+	})
+
+	t.Run("allowWrite glob under /tmp emits both spellings", func(t *testing.T) {
+		prof := profile(func(p *MacOSSandboxParams) { p.WriteAllowPaths = []string{"/tmp/fence-df/**"} })
+		assertRegexRule(t, prof, "allow file-write*", "/tmp/fence-df/**")
+		assertRegexRule(t, prof, "allow file-write*", "/private/tmp/fence-df/**")
+	})
+
+	t.Run("literal deny under /tmp emits both subpath spellings", func(t *testing.T) {
+		prof := profile(func(p *MacOSSandboxParams) { p.ReadDenyPaths = []string{"/tmp/fence-df"} })
+		for _, want := range []string{
+			`(deny file-read*`,
+			`  (subpath "/tmp/fence-df")`,
+			`  (subpath "/private/tmp/fence-df")`,
+		} {
+			if !strings.Contains(prof, want) {
+				t.Errorf("expected %q in profile:\n%s", want, prof)
+			}
+		}
+	})
+
+	t.Run("move-blocking unlink rules cover both spellings", func(t *testing.T) {
+		prof := profile(func(p *MacOSSandboxParams) { p.WriteDenyPaths = []string{"/tmp/fence-df/**"} })
+		assertRegexRule(t, prof, "deny file-write-unlink", "/tmp/fence-df/**")
+		assertRegexRule(t, prof, "deny file-write-unlink", "/private/tmp/fence-df/**")
+		for _, want := range []string{
+			`(literal "/tmp/fence-df")`,
+			`(literal "/private/tmp/fence-df")`,
+		} {
+			if !strings.Contains(prof, want) {
+				t.Errorf("expected %q in profile (move-block base dir):\n%s", want, prof)
+			}
+		}
+	})
+
+	t.Run("non-tmp paths stay single-spelling", func(t *testing.T) {
+		prof := profile(func(p *MacOSSandboxParams) { p.ReadDenyPaths = []string{"/home/user/secret/**"} })
+		assertRegexRule(t, prof, "deny file-read*", "/home/user/secret/**")
+		if strings.Contains(prof, "private/tmp") {
+			t.Errorf("non-tmp deny leaked a /private/tmp variant:\n%s", prof)
+		}
+	})
+}
+
 // TestWrapCommandMacOS_AllowsUnixSocketsUnderOwnTMPDIR verifies the full wrap path:
 // WrapCommandMacOS populates TMPDIRSocketPaths from sandboxTMPDIR (+ /private/tmp
 // mirror), so the wrapped sandbox-exec profile permits AF_UNIX bind/connect under
