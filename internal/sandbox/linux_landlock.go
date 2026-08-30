@@ -61,6 +61,9 @@ func ApplyLandlockFromConfig(cfg *config.Config, cwd string, socketPaths []strin
 		"/var/lib",
 		"/var/cache",
 		"/opt",
+		// Nix executables reference their ELF interpreter and shared libraries
+		// through /nix/store rather than the conventional /lib and /usr paths.
+		"/nix/store",
 	}
 
 	for _, p := range systemReadPaths {
