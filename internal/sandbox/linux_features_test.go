@@ -165,6 +165,75 @@ func TestLinuxFeatureTableRowsIncludeProbeFailures(t *testing.T) {
 	if userNotifyRow.Status != "unavailable" {
 		t.Fatalf("Seccomp user notification status = %q, want unavailable", userNotifyRow.Status)
 	}
+	if userNotifyRow.Details != "requires seccomp filter" {
+		t.Fatalf("Seccomp user notification details = %q, want probe failure", userNotifyRow.Details)
+	}
+}
+
+func TestLinuxSeccompUserNotifyUnavailableReason(t *testing.T) {
+	busy := unix.EBUSY.Error()
+	tests := []struct {
+		name     string
+		features *LinuxFeatures
+		want     string
+	}{
+		{name: "nil", want: "not available"},
+		{name: "empty", features: &LinuxFeatures{}, want: "not available"},
+		{
+			name: "generic probe error",
+			features: &LinuxFeatures{
+				Seccomp: LinuxSeccompCapabilities{UserNotifyError: "requires seccomp filter"},
+			},
+			want: "requires seccomp filter",
+		},
+		{
+			name: "busy without wsl",
+			features: &LinuxFeatures{
+				Seccomp: LinuxSeccompCapabilities{UserNotifyError: busy},
+			},
+			want: "an existing seccomp user-notification listener already occupies this process tree (" + busy + ")",
+		},
+		{
+			name: "busy on wsl",
+			features: &LinuxFeatures{
+				IsWSL:   true,
+				Seccomp: LinuxSeccompCapabilities{UserNotifyError: busy},
+			},
+			want: linuxSeccompUserNotifyWSLMirroredReason,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := linuxSeccompUserNotifyUnavailableReason(tt.features)
+			if got != tt.want {
+				t.Fatalf("reason = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestLinuxFeatureTableRowsExplainWSLMirroredUserNotifyBusy(t *testing.T) {
+	rows := linuxFeatureTableRows(&LinuxFeatures{
+		IsWSL: true,
+		Seccomp: LinuxSeccompCapabilities{
+			Filter:          true,
+			UserNotifyError: unix.EBUSY.Error(),
+		},
+	})
+
+	userNotifyRow, ok := findLinuxFeatureTableRow(rows, "Seccomp user notification")
+	if !ok {
+		t.Fatal("missing Seccomp user notification row")
+	}
+	if userNotifyRow.Status != "unavailable" {
+		t.Fatalf("Seccomp user notification status = %q, want unavailable", userNotifyRow.Status)
+	}
+	if !strings.Contains(userNotifyRow.Details, "WSL mirrored networking") {
+		t.Fatalf("Seccomp user notification details = %q, want WSL mirrored networking hint", userNotifyRow.Details)
+	}
+	if !strings.Contains(userNotifyRow.Details, `runtimeExecPolicy="path"`) {
+		t.Fatalf("Seccomp user notification details = %q, want path-mode workaround", userNotifyRow.Details)
+	}
 }
 
 func findLinuxFeatureTableRow(rows []linuxFeatureTableRow, capability string) (linuxFeatureTableRow, bool) {

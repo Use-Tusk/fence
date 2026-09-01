@@ -178,6 +178,32 @@ func detectLinuxSeccompCapabilities() LinuxSeccompCapabilities {
 	return caps
 }
 
+const linuxSeccompUserNotifyWSLMirroredReason = `WSL mirrored networking occupies the kernel's single seccomp user-notification listener; use networkingMode=nat or runtimeExecPolicy="path"`
+
+// linuxSeccompUserNotifyUnavailableReason maps probe failures to a user-facing
+// reason. EBUSY means an ancestor already holds the kernel's single notify
+// listener; on WSL that is almost always mirrored networking.
+func linuxSeccompUserNotifyUnavailableReason(features *LinuxFeatures) string {
+	if features == nil {
+		return "not available"
+	}
+	reason := strings.TrimSpace(features.Seccomp.UserNotifyError)
+	if reason == "" {
+		return "not available"
+	}
+	if !linuxSeccompUserNotifyErrorIsBusy(reason) {
+		return reason
+	}
+	if features.IsWSL {
+		return linuxSeccompUserNotifyWSLMirroredReason
+	}
+	return "an existing seccomp user-notification listener already occupies this process tree (" + unix.EBUSY.Error() + ")"
+}
+
+func linuxSeccompUserNotifyErrorIsBusy(reason string) bool {
+	return strings.Contains(reason, unix.EBUSY.Error())
+}
+
 func runLinuxSeccompProbeProcess(kind linuxSeccompProbeKind) error {
 	exePath, err := os.Executable()
 	if err != nil {

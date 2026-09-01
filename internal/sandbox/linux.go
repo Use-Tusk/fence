@@ -976,11 +976,7 @@ func WrapCommandLinuxWithOptions(cfg *config.Config, command string, bridge *Lin
 	fenceExePath := opts.HelperPath
 	if useArgvRuntimeExecPolicy {
 		if !features.Seccomp.UserNotify {
-			reason := features.Seccomp.UserNotifyError
-			if reason == "" {
-				reason = "not available"
-			}
-			return "", fmt.Errorf("command.runtimeExecPolicy=%q requires Linux seccomp user notification support: %s", config.RuntimeExecPolicyArgv, reason)
+			return "", fmt.Errorf("command.runtimeExecPolicy=%q requires Linux seccomp user notification support: %s", config.RuntimeExecPolicyArgv, linuxSeccompUserNotifyUnavailableReason(features))
 		}
 	}
 
@@ -1634,7 +1630,7 @@ func linuxFeatureTableRows(features *LinuxFeatures) []linuxFeatureTableRow {
 			Capability:  "Seccomp user notification",
 			RequiredFor: `runtimeExecPolicy: "argv"`,
 			Status:      linuxFeatureStatus(features.Seccomp.UserNotify),
-			Details:     linuxSeccompDetail(features.Seccomp.UserNotify, "listener filter installs", features.Seccomp.UserNotifyError),
+			Details:     linuxSeccompDetail(features.Seccomp.UserNotify, "listener filter installs", linuxSeccompUserNotifyUnavailableReason(features)),
 		},
 		{
 			Capability:  "Landlock",

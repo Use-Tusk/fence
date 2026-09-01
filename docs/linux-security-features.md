@@ -105,11 +105,14 @@ Failure mode:
 - **Fallback**: The sandbox still uses bubblewrap filesystem/PID/network isolation and Landlock where available
 - **Cause**: Older kernels, restricted containers, or emulation environments may reject seccomp filter installation even when the kernel version looks new enough
 
-### When seccomp user notification is not available (kernel < 5.0 or restricted environment)
+### When seccomp user notification is not available (kernel < 5.0, restricted environment, or WSL mirrored networking)
 
 - **Impact**: `command.runtimeExecPolicy: "argv"` cannot be used
 - **Fallback**: Fence errors if `argv` mode is explicitly requested; use `runtimeExecPolicy: "path"` for the current cross-platform runtime-exec behavior
+- **Cause**: The kernel allows only one seccomp user-notification listener per process tree. Besides older kernels and restricted environments, this fails on WSL2 when `networkingMode=mirrored` because WSL already occupies that listener for inbound `bind` interception
+- **Check**: Run `fence --linux-features` and look for `Seccomp user notification` with status `unavailable`
 - **Security**: `path` mode still blocks single-token child execs, but multi-token child exec rules remain preflight-only
+- **Workaround**: On WSL, switch to NAT (`networkingMode=nat`) to keep `argv`, or stay on mirrored networking with `runtimeExecPolicy: "path"`. See [Troubleshooting](troubleshooting.md#wsl2-argv-mode-fails-under-mirrored-networking)
 
 ### When eBPF is not available (no CAP_BPF/root)
 
@@ -146,6 +149,8 @@ Failure mode:
 ## WSL2 (Windows Subsystem for Linux)
 
 On WSL2, fence detects the WSL environment and reports it in feature detection (`wsl` in the summary line). The WSL init binary (`/init`) is automatically allowed via `wslInterop`. However, Windows executables under `/mnt/` must be configured explicitly.
+
+WSL2 mirrored networking (`networkingMode=mirrored`) occupies the kernel's single seccomp user-notification listener, so `command.runtimeExecPolicy: "argv"` cannot be used. See [Troubleshooting](troubleshooting.md#wsl2-argv-mode-fails-under-mirrored-networking).
 
 ### How it works
 
