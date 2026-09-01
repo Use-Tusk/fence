@@ -213,6 +213,8 @@ wsl.exe hostname -I              # e.g. 172.20.143.42
 If you also want Windows-side `localhost:PORT` to work in that case,
 either bind on `127.0.0.1` instead, or enable WSL2 mirrored networking
 (`[wsl2] networkingMode=mirrored` in `%UserProfile%\.wslconfig`).
+Mirrored networking breaks `command.runtimeExecPolicy: "argv"` — see
+[WSL2: argv mode fails under mirrored networking](#wsl2-argv-mode-fails-under-mirrored-networking).
 
 You can confirm fence's listener address with:
 
@@ -228,6 +230,38 @@ need the WSL VM IP route above.
 > the sandbox (`127.0.0.1`, `0.0.0.0`, …). The bind address `-p` controls
 > is only the host-side reverse-bridge listener that relays inbound traffic
 > into the sandbox.
+
+## WSL2: argv mode fails under mirrored networking
+
+`command.runtimeExecPolicy: "argv"` fails on WSL2 when mirrored networking
+is enabled:
+
+```text
+Error: failed to wrap command: command.runtimeExecPolicy="argv" requires Linux seccomp user notification support: WSL mirrored networking occupies the kernel's single seccomp user-notification listener; use networkingMode=nat or runtimeExecPolicy="path"
+```
+
+Older Fence builds report the same failure as a bare `device or resource busy`.
+
+Mirrored mode (`networkingMode=mirrored` in `%UserProfile%\.wslconfig`)
+installs a seccomp user-notification listener on distro PID 1 so WSL can
+intercept `bind` for inbound connectivity. The kernel allows only one such
+listener per process tree, so Fence cannot install the listener `argv` mode
+needs. This is a WSL limitation
+([microsoft/WSL#9548](https://github.com/microsoft/WSL/issues/9548)), not
+something Fence can work around.
+
+`fence --linux-features` shows `Seccomp filter` and `Seccomp log action` as
+`ok`, with `Seccomp user notification` `unavailable`. Ordinary syscall
+hardening still works.
+
+**Workarounds:**
+
+1. **Keep `argv`:** switch WSL back to NAT. Remove `networkingMode=mirrored`
+   (or set `networkingMode=nat`) in `%UserProfile%\.wslconfig`, then
+   `wsl --shutdown`.
+2. **Keep mirrored networking:** use `command.runtimeExecPolicy: "path"`
+   (the default). Single-token denies still apply at runtime; multi-token
+   child-exec rules stay preflight-only.
 
 ## WSL2: "Permission denied" for wslpath or Windows .exe files
 
