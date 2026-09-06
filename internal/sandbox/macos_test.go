@@ -653,6 +653,49 @@ func TestMacOS_TMPCanonicalizationInPathRules(t *testing.T) {
 		assertRegexRule(t, prof, "deny file-read*", "/etc/fence/**")
 		assertRegexRule(t, prof, "deny file-read*", "/private/etc/fence/**")
 	})
+
+	t.Run("permissive allowRead literal re-allow under /tmp covers both spellings", func(t *testing.T) {
+		// PR #218 re-allow: allowRead must beat a denyRead glob. The re-allow
+		// must carry both /tmp spellings or the override silently misses the
+		// kernel-resolved /private/tmp path.
+		prof := profile(func(p *MacOSSandboxParams) {
+			p.ReadAllowPaths = []string{"/tmp/fence-df/secret.txt"}
+			p.ReadDenyPaths = []string{"/tmp/fence-df/**"}
+		})
+		// Literal re-allow rules render multi-line: (allow file-read-data\n  (subpath "…")).
+		for _, spelling := range []string{"/tmp/fence-df/secret.txt", "/private/tmp/fence-df/secret.txt"} {
+			want := fmt.Sprintf("(allow file-read-data\n  (subpath %q))", spelling)
+			if strings.Count(prof, want) != 1 {
+				t.Errorf("expected %q exactly once in profile (re-allow override):\n%s", want, prof)
+			}
+		}
+		assertRegexRule(t, prof, "deny file-read*", "/tmp/fence-df/**")
+		assertRegexRule(t, prof, "deny file-read*", "/private/tmp/fence-df/**")
+	})
+
+	t.Run("permissive allowRead glob re-allow under /var covers both spellings", func(t *testing.T) {
+		// Bot P1 (cubic, confidence 9): glob override under /var failed after
+		// kernel resolution — deny had /private/var, re-allow only /var.
+		prof := profile(func(p *MacOSSandboxParams) {
+			p.ReadAllowPaths = []string{"/var/folders/fence/secret/*.txt"}
+			p.ReadDenyPaths = []string{"/var/folders/fence/**"}
+		})
+		assertRegexRule(t, prof, "allow file-read-data", "/var/folders/fence/secret/*.txt")
+		assertRegexRule(t, prof, "allow file-read-data", "/private/var/folders/fence/secret/*.txt")
+		assertRegexRule(t, prof, "allow file-read-metadata", "/private/var/folders/fence/secret/*.txt")
+		assertRegexRule(t, prof, "deny file-read*", "/var/folders/fence/**")
+		assertRegexRule(t, prof, "deny file-read*", "/private/var/folders/fence/**")
+	})
+
+	t.Run("permissive allowRead glob re-allow under /etc covers both spellings", func(t *testing.T) {
+		prof := profile(func(p *MacOSSandboxParams) {
+			p.ReadAllowPaths = []string{"/etc/fence/*.conf"}
+			p.ReadDenyPaths = []string{"/etc/fence/**"}
+		})
+		assertRegexRule(t, prof, "allow file-read-data", "/etc/fence/*.conf")
+		assertRegexRule(t, prof, "allow file-read-data", "/private/etc/fence/*.conf")
+		assertRegexRule(t, prof, "deny file-read*", "/private/etc/fence/**")
+	})
 }
 
 // TestWrapCommandMacOS_AllowsUnixSocketsUnderOwnTMPDIR verifies the full wrap path:

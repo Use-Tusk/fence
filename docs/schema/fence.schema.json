@@ -113,7 +113,7 @@
           "type": "boolean"
         },
         "denyRead": {
-          "description": "Paths explicitly blocked from reading, even if they would otherwise be permitted by allowRead or system defaults.",
+          "description": "Paths explicitly blocked from reading, even if they would otherwise be permitted by allowRead or system defaults. macOS wrap-mode in permissive mode (defaultDenyRead off) may re-allow a specific path via allowRead.",
           "items": {
             "type": "string"
           },

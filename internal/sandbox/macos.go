@@ -307,6 +307,41 @@ func generateReadRules(defaultDenyRead, strictDenyRead bool, allowPaths, denyPat
 		}
 	}
 
+	// Permissive mode: re-allow the specific paths the user listed in allowRead,
+	// even when a template denyRead covers them (e.g. re-allowing
+	// ~/.gnupg/pubring.kbx under the code template's ~/.gnupg/** deny for gpg
+	// signing). Emitted AFTER the denies: per the note above, a specific
+	// operation allow (file-read-data/metadata) is not overridden by a wildcard
+	// deny (file-read*), so the explicit user grant wins. Both ops are needed —
+	// `deny file-read*` covers data AND metadata. Skipped when there are no
+	// denies: the blanket (allow file-read*) already permits everything, so the
+	// rules would be pure noise (deny-free profiles stay byte-identical).
+	if !defaultDenyRead && len(denyPaths) > 0 {
+		for _, pathPattern := range allowPaths {
+			// Emit both /tmp,/var,/etc and /private/* spellings so the re-allow
+			// matches the kernel-resolved path (see seatbeltPathSpellings). The
+			// deny loop already emits both; without this, an allowRead override
+			// under /var or /etc (glob or not-yet-existing literal) silently
+			// misses and the deny wins.
+			for _, normalized := range seatbeltPathSpellings(pathPattern) {
+				regex := ""
+				if ContainsGlobChars(normalized) {
+					regex = GlobToRegex(normalized)
+				}
+				for _, op := range []string{"file-read-data", "file-read-metadata"} {
+					if regex != "" {
+						builder.addRule(buildFileSystemRegexRule("allow "+op, regex, ""))
+					} else {
+						builder.addRule(
+							"(allow "+op,
+							fmt.Sprintf("  (subpath %s))", escapePath(normalized)),
+						)
+					}
+				}
+			}
+		}
+	}
+
 	// Block file movement to prevent bypass
 	generateMoveBlockingRules(builder, denyPaths, logTag)
 
